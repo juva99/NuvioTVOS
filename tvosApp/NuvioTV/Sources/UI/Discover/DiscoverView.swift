@@ -168,7 +168,7 @@ struct FilterMenu<MenuContent: View>: View {
         .modifier(GlassChipBackground(filled: false))
         .overlay(
             Capsule()
-                .strokeBorder(Color.white.opacity(focused ? 0.9 : 0), lineWidth: 2)
+                .strokeBorder(Color.white.opacity(focused ? 0.86 : 0), lineWidth: focused ? 3 : 0)
         )
     }
 }
@@ -182,7 +182,6 @@ private struct DiscoverCard: View {
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
-    @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
 
     var body: some View {
         Button(action: action) {
@@ -262,6 +261,6 @@ private struct DiscoverCard: View {
     }
 
     private var focusBorderColor: Color {
-        SettingsAccent.color(for: theme)
+        .white.opacity(0.86)
     }
 }

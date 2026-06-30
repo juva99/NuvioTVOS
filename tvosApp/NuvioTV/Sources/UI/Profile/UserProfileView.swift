@@ -142,7 +142,7 @@ struct ProfileCard: View {
                 .overlay(alignment: .bottomTrailing) { badge }
                 .overlay(
                     Circle()
-                        .stroke(Color.white, lineWidth: isFocused ? 6 : 0)
+                        .stroke(Color.white.opacity(isFocused ? 0.86 : 0), lineWidth: isFocused ? 3 : 0)
                 )
                 .shadow(color: isFocused ? Color.white.opacity(0.3) : .clear, radius: 24)
 
@@ -209,8 +209,8 @@ struct AddProfileButton: View {
                     )
                     .overlay(
                         Circle()
-                            .stroke(isFocused ? Color.white : Color.white.opacity(0.3),
-                                    lineWidth: isFocused ? 6 : 2)
+                            .stroke(isFocused ? Color.white.opacity(0.86) : Color.white.opacity(0.3),
+                                    lineWidth: isFocused ? 3 : 2)
                     )
                     .shadow(color: isFocused ? Color.white.opacity(0.3) : .clear, radius: 24)
 

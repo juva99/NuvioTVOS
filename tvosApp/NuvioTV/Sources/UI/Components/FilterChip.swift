@@ -64,20 +64,20 @@ struct FilterChip: View {
     }
 
     private var borderColor: Color {
-        if selected {
+        if isFocused {
+            return .white.opacity(0.86)
+        } else if selected {
             return .white
-        } else if isFocused {
-            return .white.opacity(0.5)
         } else {
             return .clear
         }
     }
 
     private var borderWidth: CGFloat {
-        if selected {
+        if isFocused {
+            return 3
+        } else if selected {
             return 2
-        } else if isFocused {
-            return 1
         } else {
             return 0
         }

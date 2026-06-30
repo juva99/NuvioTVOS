@@ -90,7 +90,6 @@ struct LibraryItemButton: View {
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
-    @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
     
     var body: some View {
         Button(action: action) {
@@ -137,6 +136,6 @@ struct LibraryItemButton: View {
     }
 
     private var focusBorderColor: Color {
-        SettingsAccent.color(for: theme)
+        .white.opacity(0.86)
     }
 }

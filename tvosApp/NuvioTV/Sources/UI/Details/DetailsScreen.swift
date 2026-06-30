@@ -1100,7 +1100,7 @@ private struct TvEpisodeCard: View {
             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
-                    .stroke(Color.white.opacity(isFocused ? 0.9 : 0), lineWidth: 5)
+                    .stroke(Color.white.opacity(isFocused ? 0.86 : 0), lineWidth: isFocused ? 3 : 0)
             )
             .shadow(color: .black.opacity(isFocused ? 0.4 : 0.16), radius: isFocused ? 26 : 10, y: 12)
         }
@@ -1630,7 +1630,7 @@ private struct TvStreamCard: View {
             )
             .overlay(
                 RoundedRectangle(cornerRadius: 22, style: .continuous)
-                    .stroke(Color.white.opacity(isFocused ? 0.85 : 0.10), lineWidth: isFocused ? 4 : 1)
+                    .stroke(Color.white.opacity(isFocused ? 0.86 : 0.10), lineWidth: isFocused ? 3 : 1)
             )
             .shadow(color: .black.opacity(isFocused ? 0.44 : 0.18), radius: isFocused ? 26 : 10, y: 12)
         }

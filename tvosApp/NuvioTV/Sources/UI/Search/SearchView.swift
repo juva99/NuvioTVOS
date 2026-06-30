@@ -261,7 +261,6 @@ private struct SearchResultCard: View {
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
-    @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
 
     var body: some View {
         Button(action: action) {
@@ -317,7 +316,7 @@ private struct SearchResultCard: View {
     }
 
     private var focusBorderColor: Color {
-        SettingsAccent.color(for: theme)
+        .white.opacity(0.86)
     }
 }
 
@@ -424,14 +423,14 @@ struct GlassChip: View {
 }
 
 /// Liquid Glass capsule for the search bar, with a material fallback for tvOS < 26.
-private struct GlassCapsule: ViewModifier {
+struct GlassCapsule: ViewModifier {
     let focused: Bool
 
     func body(content: Content) -> some View {
         glassed(content)
             .overlay(
                 Capsule().stroke(
-                    Color.white.opacity(focused ? 0.9 : 0.18),
+                    Color.white.opacity(focused ? 0.86 : 0.18),
                     lineWidth: focused ? 3 : 1
                 )
             )

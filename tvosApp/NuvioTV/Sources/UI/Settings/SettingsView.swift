@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 private enum SettingsCategory: String, CaseIterable, Identifiable {
     case account = "Account & Profiles"
@@ -305,6 +306,12 @@ enum SettingsBackground: String, CaseIterable, Identifiable {
     case forest = "Forest"
     case plum = "Plum"
     case slate = "Slate"
+    case wine = "Wine"
+    case ocean = "Ocean"
+    case indigo = "Indigo"
+    case crimson = "Crimson"
+    case rust = "Rust"
+    case teal = "Teal"
 
     var id: String { rawValue }
 
@@ -316,6 +323,12 @@ enum SettingsBackground: String, CaseIterable, Identifiable {
         case .forest: return Color(red: 0.018, green: 0.048, blue: 0.036)
         case .plum: return Color(red: 0.045, green: 0.020, blue: 0.060)
         case .slate: return Color(red: 0.040, green: 0.046, blue: 0.056)
+        case .wine: return Color(red: 0.110, green: 0.015, blue: 0.040)
+        case .ocean: return Color(red: 0.012, green: 0.055, blue: 0.085)
+        case .indigo: return Color(red: 0.035, green: 0.028, blue: 0.100)
+        case .crimson: return Color(red: 0.130, green: 0.012, blue: 0.025)
+        case .rust: return Color(red: 0.100, green: 0.040, blue: 0.012)
+        case .teal: return Color(red: 0.012, green: 0.070, blue: 0.065)
         }
     }
 
@@ -328,6 +341,12 @@ enum SettingsBackground: String, CaseIterable, Identifiable {
         case .forest: return Color(red: 0.10, green: 0.28, blue: 0.20)
         case .plum: return Color(red: 0.26, green: 0.12, blue: 0.34)
         case .slate: return Color(red: 0.24, green: 0.27, blue: 0.32)
+        case .wine: return Color(red: 0.52, green: 0.09, blue: 0.20)
+        case .ocean: return Color(red: 0.09, green: 0.36, blue: 0.50)
+        case .indigo: return Color(red: 0.24, green: 0.19, blue: 0.56)
+        case .crimson: return Color(red: 0.64, green: 0.11, blue: 0.14)
+        case .rust: return Color(red: 0.56, green: 0.27, blue: 0.09)
+        case .teal: return Color(red: 0.07, green: 0.42, blue: 0.39)
         }
     }
 
@@ -336,14 +355,53 @@ enum SettingsBackground: String, CaseIterable, Identifiable {
     }
 }
 
+/// True while focus is still in the sidebar and hasn't entered the detail pane.
+/// Every focusable detail row reads this and disables itself when set, so the
+/// only focusable target on a right-press is the pane's first row (which opts out
+/// via `.settingsEntryAnchor()`). That makes "right" always land on the first row
+/// instead of whichever row happens to line up with the sidebar pill's height.
+private struct SettingsEntryLockedKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var settingsEntryLocked: Bool {
+        get { self[SettingsEntryLockedKey.self] }
+        set { self[SettingsEntryLockedKey.self] = newValue }
+    }
+}
+
+extension View {
+    /// Marks the detail pane's first row so it stays focusable while the rest of
+    /// the pane is entry-locked — i.e. the row a right-press should land on.
+    func settingsEntryAnchor() -> some View {
+        environment(\.settingsEntryLocked, false)
+    }
+
+    /// Disables this focusable row whenever the pane is entry-locked (focus still
+    /// in the sidebar), reading the flag from the environment so call sites don't
+    /// have to thread it. Composes with any other `.disabled(...)` on the row.
+    func entryLockable() -> some View {
+        modifier(EntryLockable())
+    }
+}
+
+private struct EntryLockable: ViewModifier {
+    @Environment(\.settingsEntryLocked) private var locked
+    func body(content: Content) -> some View {
+        content.disabled(locked)
+    }
+}
+
 struct SettingsView: View {
     @State private var selectedCategory: SettingsCategory = .account
     @State private var isSubtitleLanguagePickerPresented = false
     @FocusState private var focusedCategory: SettingsCategory?
-    /// Mirrors the previously focused pill so we can tell a *return from the
-    /// detail pane* (previous focus was nil) apart from ordinary up/down moves
-    /// within the sidebar. Drives the left-press snap-back below.
-    @State private var lastFocusedCategory: SettingsCategory?
+    /// Whether focus has entered the current category's detail pane at least once.
+    /// The entry lock (land on the first row) only fires on the first entry; after
+    /// that, re-entry stays unlocked so the detail's own focus restoration can
+    /// return to the last row instead of being blocked by the lock.
+    @State private var detailVisited = false
     @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
@@ -364,19 +422,14 @@ struct SettingsView: View {
                     .focusSection()
                     .defaultFocusIfAvailable($focusedCategory, selectedCategory)
                     .onChange(of: focusedCategory) { newValue in
-                        let cameFromDetail = lastFocusedCategory == nil
-                        lastFocusedCategory = newValue
-                        // tvOS resolves a left-press out of the detail pane purely by
-                        // geometry, so it lands on whichever pill is vertically in
-                        // line with the focused row (e.g. Integrations) instead of the
-                        // open category. focusSection() only groups the sidebar for
-                        // entry — it doesn't restore the last-focused pill on a
-                        // directional move. So when focus comes back to the sidebar
-                        // from the detail (previous focus was nil), snap it onto the
-                        // selected category so "left" always returns to the open section.
-                        if cameFromDetail, let newValue, newValue != selectedCategory {
-                            focusedCategory = selectedCategory
-                        }
+                        // focusedCategory goes nil exactly when focus leaves the
+                        // sidebar for the detail pane — record that so re-entry is
+                        // no longer locked to the first row.
+                        if newValue == nil { detailVisited = true }
+                    }
+                    .onChange(of: selectedCategory) { _ in
+                        // A newly opened category should lock to its first row again.
+                        detailVisited = false
                     }
 
                 Group {
@@ -402,6 +455,11 @@ struct SettingsView: View {
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .focusSection()
+                // Lock every detail row except the first while focus is still in
+                // the sidebar and this category hasn't been entered yet, so the
+                // first right-press lands on the first row regardless of which pill
+                // it came from. Cleared once focus enters so re-entry isn't blocked.
+                .environment(\.settingsEntryLocked, focusedCategory != nil && !detailVisited)
             }
             .disabled(isSubtitleLanguagePickerPresented)
             .allowsHitTesting(!isSubtitleLanguagePickerPresented)
@@ -433,8 +491,19 @@ struct SettingsView: View {
 
             VStack(alignment: .leading, spacing: 14) {
                 ForEach(SettingsCategory.allCases) { category in
-                    let isFocusedCategory = focusedCategory == category
                     let isSelectedCategory = selectedCategory == category
+                    let isFocusedCategory = focusedCategory == category
+                    // Fixes "left out of the detail pane flashes the wrong pill":
+                    // while focus is in the detail pane (focusedCategory == nil), only
+                    // the open category stays focusable. A left-press is directional
+                    // and tvOS lands on the geometric nearest *focusable* pill, so
+                    // with a single candidate it goes straight to the open one — no
+                    // wrong pill ever receives focus, so none can flash. All pills
+                    // become focusable again the moment focus is back in the sidebar,
+                    // so up/down still moves between every category. Disabling is safe
+                    // visually here: PosterCardButtonStyle ignores isEnabled, so a
+                    // non-focusable pill looks identical to a focusable one.
+                    let isFocusable = isSelectedCategory || focusedCategory != nil
 
                     SettingsCategoryPill(
                         category: category,
@@ -445,6 +514,7 @@ struct SettingsView: View {
                         selectedCategory = category
                     }
                     .focused($focusedCategory, equals: category)
+                    .disabled(!isFocusable)
                 }
             }
         }
@@ -603,6 +673,7 @@ private struct AccountSettingsView: View {
                     placeholder: "Nuvio User",
                     text: $profileName
                 )
+                .settingsEntryAnchor()
 
                 SettingsToggleRow(
                     title: "PIN Protection",
@@ -661,11 +732,12 @@ private struct AppearanceSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
             SettingsGroup(title: "Focus Outline", subtitle: "Accent color used for focused cards and controls") {
-                SettingsSwatchRow(swatches: accentSwatches, selection: $theme)
+                SettingsSwatchRow(swatches: accentSwatches, selection: $theme, accentColor: accentColor)
+                    .settingsEntryAnchor()
             }
 
             SettingsGroup(title: "App Background", subtitle: "Body background color behind every screen") {
-                SettingsSwatchRow(swatches: backgroundSwatches, selection: $bodyColor)
+                SettingsSwatchRow(swatches: backgroundSwatches, selection: $bodyColor, accentColor: accentColor)
 
                 SettingsToggleRow(
                     title: "AMOLED Mode",
@@ -738,6 +810,7 @@ private struct LayoutDiscoverySettingsView: View {
                     options: layouts,
                     accentColor: accentColor
                 )
+                .settingsEntryAnchor()
 
                 SettingsToggleRow(
                     title: "Hero Section",
@@ -912,6 +985,7 @@ private struct PlaybackSettingsView: View {
                     options: engines,
                     accentColor: accentColor
                 )
+                .settingsEntryAnchor()
 
                 SettingsToggleRow(
                     title: "Auto-Play Next Episode",
@@ -1101,6 +1175,7 @@ struct SubtitleStyleEditor: View {
                     suffix: "%",
                     accentColor: accentColor
                 )
+                .settingsEntryAnchor()
 
                 SettingsToggleRow(
                     title: "Bold",
@@ -1360,20 +1435,21 @@ private struct SubtitleColorSwatchButton: View {
                 )
                 .overlay(
                     Circle()
-                        .strokeBorder(ringColor, lineWidth: isFocused ? 5 : (isSelected ? 4 : 0))
+                        .strokeBorder(ringColor, lineWidth: isFocused ? 3 : (isSelected ? 4 : 0))
                         .padding(-4)
                 )
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
+        .entryLockable()
         .scaleEffect(isFocused ? 1.18 : 1.0)
         .zIndex(isFocused ? 1 : 0)
         .animation(.easeOut(duration: 0.14), value: isFocused)
     }
 
     private var ringColor: Color {
-        if isFocused { return .white }
+        if isFocused { return .white.opacity(0.86) }
         return isSelected ? accentColor : .clear
     }
 }
@@ -1580,6 +1656,7 @@ private struct AdvancedSettingsView: View {
                     isOn: $fastNavigation,
                     accentColor: accentColor
                 )
+                .settingsEntryAnchor()
 
                 SettingsToggleRow(
                     title: "Smooth Bring Into View",
@@ -1649,6 +1726,7 @@ private struct AboutSettingsView: View {
                     accentColor: accentColor,
                     action: {}
                 )
+                .settingsEntryAnchor()
             }
         }
     }
@@ -1677,6 +1755,7 @@ private struct AddonsSettingsSection: View {
                 text: $streamAddonManifestURL,
                 fieldWidth: 560
             )
+            .settingsEntryAnchor()
 
             ForEach($addons) { $addon in
                 AddonSettingsRow(addon: addon, accentColor: accentColor) {
@@ -1742,6 +1821,7 @@ private struct AddonSettingsRow: View {
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
         .disabled(addon.isLocked)
+        .entryLockable()
     }
 
     private var statusLabel: String {
@@ -1861,6 +1941,7 @@ private struct SettingsToggleRow: View {
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
+        .entryLockable()
     }
 }
 
@@ -1897,6 +1978,7 @@ private struct SettingsOptionRow: View {
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
+        .entryLockable()
     }
 
     private var currentValue: String {
@@ -1928,20 +2010,26 @@ private struct SettingsStepperRow: View {
             Spacer(minLength: 24)
 
             HStack(spacing: 12) {
-                SettingsMiniButton(systemName: "minus", accentColor: accentColor) {
+                SettingsMiniButton(
+                    systemName: "minus",
+                    accentColor: accentColor,
+                    isAtBound: value <= range.lowerBound
+                ) {
                     value = max(range.lowerBound, value - step)
                 }
-                .disabled(value <= range.lowerBound)
 
                 Text("\(value)\(suffix)")
                     .font(.system(size: 20, weight: .bold))
                     .foregroundColor(.white)
                     .frame(width: 78)
 
-                SettingsMiniButton(systemName: "plus", accentColor: accentColor) {
+                SettingsMiniButton(
+                    systemName: "plus",
+                    accentColor: accentColor,
+                    isAtBound: value >= range.upperBound
+                ) {
                     value = min(range.upperBound, value + step)
                 }
-                .disabled(value >= range.upperBound)
             }
         }
         .focused($isFocused)
@@ -1958,33 +2046,143 @@ private struct SettingsTextFieldRow: View {
     var fieldWidth: CGFloat = 300
 
     @FocusState private var isFocused: Bool
+    @State private var isEditing = false
 
     var body: some View {
-        SettingsRowShell(isFocused: isFocused, accentColor: .white) {
-            SettingsRowText(title: title, subtitle: subtitle)
+        // The whole row is the focusable button (not just the right-hand capsule),
+        // so it matches every other settings row: full-width and left-aligned. That
+        // also fixes detail-pane entry — a right-press from the sidebar lands on this
+        // first row instead of skipping past the narrow capsule to the next row down.
+        Button {
+            isEditing = true
+        } label: {
+            SettingsRowShell(isFocused: isFocused, accentColor: .white) {
+                SettingsRowText(title: title, subtitle: subtitle)
 
-            Spacer(minLength: 24)
+                Spacer(minLength: 24)
 
-            if isSecure {
-                SecureField(placeholder, text: $text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .frame(width: fieldWidth, height: 48)
-                    .settingsGlass(shape: Capsule(), isProminent: isFocused)
-            } else {
-                TextField(placeholder, text: $text)
-                    .textFieldStyle(.plain)
-                    .font(.system(size: 20, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 16)
-                    .frame(width: fieldWidth, height: 48)
-                    .settingsGlass(shape: Capsule(), isProminent: isFocused)
+                SettingsGlassTextField(
+                    text: $text,
+                    placeholder: placeholder,
+                    isSecure: isSecure,
+                    focused: isFocused,
+                    isEditing: $isEditing,
+                    fieldWidth: fieldWidth
+                )
             }
         }
+        .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .entryLockable()
     }
+}
+
+/// Display half of the text-field row, styled to match the Search tab's glass
+/// capsule. A hidden, off-screen UITextField drives editing (a native focused
+/// TextField/SecureField on tvOS always paints its own white pill); the owning
+/// row supplies focus and toggles `isEditing` when clicked.
+private struct SettingsGlassTextField: View {
+    @Binding var text: String
+    let placeholder: String
+    var isSecure: Bool = false
+    var focused: Bool
+    @Binding var isEditing: Bool
+    var fieldWidth: CGFloat = 300
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            HiddenSettingsTextField(text: $text, isEditing: $isEditing, isSecure: isSecure)
+                .frame(width: 1, height: 1)
+                .offset(x: -4_000)
+                .allowsHitTesting(false)
+
+            Text(displayText)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundColor(text.isEmpty ? .white.opacity(0.45) : .white)
+                .lineLimit(1)
+                .padding(.horizontal, 16)
+                .allowsHitTesting(false)
+        }
+        .frame(width: fieldWidth, height: 48)
+        .modifier(GlassCapsule(focused: focused || isEditing))
+    }
+
+    private var displayText: String {
+        guard !text.isEmpty else { return placeholder }
+        return isSecure ? String(repeating: "•", count: text.count) : text
+    }
+}
+
+private struct HiddenSettingsTextField: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var isEditing: Bool
+    var isSecure: Bool = false
+
+    func makeUIView(context: Context) -> HiddenSettingsUITextField {
+        let textField = HiddenSettingsUITextField(frame: .zero)
+        textField.delegate = context.coordinator
+        textField.backgroundColor = .clear
+        textField.textColor = .clear
+        textField.tintColor = .clear
+        textField.returnKeyType = .done
+        textField.keyboardAppearance = .dark
+        textField.autocorrectionType = .no
+        textField.autocapitalizationType = .none
+        textField.isSecureTextEntry = isSecure
+        textField.addTarget(
+            context.coordinator,
+            action: #selector(Coordinator.textDidChange(_:)),
+            for: .editingChanged
+        )
+        return textField
+    }
+
+    func updateUIView(_ uiView: HiddenSettingsUITextField, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+
+        if isEditing && !uiView.isFirstResponder {
+            DispatchQueue.main.async {
+                uiView.becomeFirstResponder()
+            }
+        } else if !isEditing && uiView.isFirstResponder {
+            uiView.resignFirstResponder()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, isEditing: $isEditing)
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        private let text: Binding<String>
+        private let isEditing: Binding<Bool>
+
+        init(text: Binding<String>, isEditing: Binding<Bool>) {
+            self.text = text
+            self.isEditing = isEditing
+        }
+
+        @objc func textDidChange(_ sender: UITextField) {
+            text.wrappedValue = sender.text ?? ""
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            isEditing.wrappedValue = false
+            textField.resignFirstResponder()
+            return true
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            isEditing.wrappedValue = false
+        }
+    }
+}
+
+private final class HiddenSettingsUITextField: UITextField {
+    override var canBecomeFocused: Bool { false }
 }
 
 private struct SettingsActionRow: View {
@@ -2016,6 +2214,7 @@ private struct SettingsActionRow: View {
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
+        .entryLockable()
     }
 }
 
@@ -2056,13 +2255,15 @@ struct SettingsSwatch: Identifiable {
 private struct SettingsSwatchRow: View {
     let swatches: [SettingsSwatch]
     @Binding var selection: String
+    let accentColor: Color
 
     var body: some View {
         HStack(spacing: 14) {
             ForEach(swatches) { swatch in
                 SettingsSwatchButton(
                     swatch: swatch,
-                    isSelected: selection == swatch.id
+                    isSelected: selection == swatch.id,
+                    accentColor: accentColor
                 ) {
                     selection = swatch.id
                 }
@@ -2077,51 +2278,45 @@ private struct SettingsSwatchRow: View {
 private struct SettingsSwatchButton: View {
     let swatch: SettingsSwatch
     let isSelected: Bool
+    let accentColor: Color
     let action: () -> Void
 
     @FocusState private var isFocused: Bool
 
     var body: some View {
         Button(action: action) {
-            VStack(spacing: 8) {
+            VStack(spacing: 10) {
                 Circle()
                     .fill(swatch.color)
-                    .frame(width: 42, height: 42)
+                    .frame(width: 48, height: 48)
                     .overlay(
                         Circle()
-                            .strokeBorder(
-                                isSelected ? Color.white : Color.white.opacity(0.18),
-                                lineWidth: isSelected ? 4 : 1
-                            )
+                            .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
                     )
+                .overlay(
+                    Circle()
+                        .strokeBorder(ringColor, lineWidth: isFocused ? 3 : (isSelected ? 4 : 0))
+                        .padding(-4)
+                )
 
                 Text(swatch.label)
                     .font(.system(size: 14, weight: .bold))
                     .foregroundColor(.white.opacity(isFocused || isSelected ? 1 : 0.65))
                     .lineLimit(1)
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 12)
-            .background(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .fill(swatchFill)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 14, style: .continuous)
-                    .strokeBorder(isFocused ? Color.white : Color.clear, lineWidth: 4)
-            )
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
-        .scaleEffect(isFocused ? 1.12 : 1.0)
+        .entryLockable()
+        .scaleEffect(isFocused ? 1.18 : 1.0)
         .zIndex(isFocused ? 1 : 0)
         .animation(.easeOut(duration: 0.14), value: isFocused)
     }
 
-    private var swatchFill: Color {
-        if isFocused { return Color.white.opacity(0.16) }
-        return isSelected ? swatch.color.opacity(0.18) : Color.white.opacity(0.045)
+    private var ringColor: Color {
+        if isFocused { return .white.opacity(0.86) }
+        return isSelected ? accentColor : .clear
     }
 }
 
@@ -2169,26 +2364,31 @@ private struct SettingsRowText: View {
 private struct SettingsMiniButton: View {
     let systemName: String
     let accentColor: Color
+    /// Whether the stepper is at its min/max — drives the dimmed look. Kept
+    /// separate from `.disabled` so the entry-lock can disable focus without
+    /// also dimming the button while the sidebar is focused.
+    var isAtBound: Bool = false
     let action: () -> Void
 
     @FocusState private var isFocused: Bool
-    @Environment(\.isEnabled) private var isEnabled
 
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
                 .font(.system(size: 18, weight: .bold))
-                .foregroundColor(isEnabled ? .white : .white.opacity(0.32))
+                .foregroundColor(isAtBound ? .white.opacity(0.32) : .white)
                 .frame(width: 44, height: 44)
                 .settingsGlass(shape: Circle(), isProminent: isFocused)
                 .overlay(
                     Circle()
-                        .strokeBorder(isFocused ? accentColor.opacity(0.78) : Color.white.opacity(0.12), lineWidth: 1)
+                        .strokeBorder(isFocused ? Color.white.opacity(0.86) : Color.white.opacity(0.12), lineWidth: isFocused ? 3 : 1)
                 )
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
+        .disabled(isAtBound)
+        .entryLockable()
     }
 }
 

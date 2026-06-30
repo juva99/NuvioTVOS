@@ -33,7 +33,6 @@ struct PosterCard: View {
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
     @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
-    @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
     #endif
 
     var body: some View {
@@ -253,11 +252,11 @@ struct PosterCard: View {
 
     private var focusedBorderColor: Color {
         guard isFocused else { return .clear }
-        return SettingsAccent.color(for: theme)
+        return .white.opacity(0.86)
     }
 
     private var focusedBorderWidth: CGFloat {
-        isFocused ? (focusHighlighter ? 4 : 2) : 0
+        isFocused ? (focusHighlighter ? 5 : 3) : 0
     }
 
     private var shadowOpacity: Double {
