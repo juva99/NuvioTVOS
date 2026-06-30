@@ -1,0 +1,771 @@
+//
+//  CatalogRepository.swift
+//  NuvioTV
+//
+//  Created by Claude Code
+//  Repository protocol for catalog operations
+//
+
+import Foundation
+
+/// Repository protocol for catalog operations
+protocol CatalogRepository {
+    /// Get catalogs for home screen
+    func getHomeCatalogs() async throws -> [NuvioCatalog]
+
+    /// Get metadata for a specific content item. `type` ("movie"/"series") is
+    /// carried from the catalog item so the correct meta endpoint is queried —
+    /// series ids have no reliable marker to guess from.
+    func getMetadata(id: String, type: String) async throws -> NuvioMeta
+
+    /// Get available streams for content
+    func getStreams(id: String, type: String) async throws -> [NuvioStream]
+
+    /// Search for content
+    func search(query: String) async throws -> [NuvioMeta]
+
+    /// Browse catalog with pagination and filters
+    func browseCatalog(
+        contentType: String,
+        catalogId: String,
+        page: Int,
+        genre: String?,
+        year: Int?,
+        sort: String?
+    ) async throws -> CatalogPage
+
+    /// Browse catalog using a Stremio skip offset.
+    func browseCatalog(
+        contentType: String,
+        catalogId: String,
+        skip: Int,
+        genre: String?
+    ) async throws -> CatalogPage
+
+    /// Get available genres for content type
+    func getGenres(contentType: String) async throws -> [String]
+}
+
+/// Live Cinemeta-backed implementation used by the tvOS home prototype.
+final class CinemetaCatalogRepository: CatalogRepository {
+    private let baseURL = URL(string: "https://v3-cinemeta.strem.io")!
+    private let decoder = JSONDecoder()
+    private var cachedMetaById: [String: NuvioMeta] = [:]
+    private var streamAddons: [StremioStreamAddon] {
+        guard let manifestURL = Self.configuredStreamAddonManifestURL else { return [] }
+        return [
+            StremioStreamAddon(
+                name: Self.streamAddonName(for: manifestURL),
+                manifestURL: manifestURL
+            )
+        ]
+    }
+    private let subtitleAddons = [
+        StremioSubtitleAddon(
+            name: "OpenSubtitles v3",
+            manifestURL: URL(string: "https://opensubtitles-v3.strem.io/manifest.json")!
+        )
+    ]
+    private let genres = [
+        "Action", "Adventure", "Animation", "Biography", "Comedy",
+        "Crime", "Documentary", "Drama", "Family", "Fantasy",
+        "History", "Horror", "Mystery", "Romance", "Sci-Fi",
+        "Sport", "Thriller", "War", "Western", "Reality-TV",
+        "Talk-Show", "Game-Show"
+    ]
+
+    func getHomeCatalogs() async throws -> [NuvioCatalog] {
+        let specs: [(id: String, name: String, type: String, catalogId: String)] = [
+            ("movie_top", "Popular - Movies", "movie", "top"),
+            ("series_top", "Popular - Series", "series", "top"),
+            ("movie_rating", "Top Rated - Movies", "movie", "imdbRating"),
+            ("series_rating", "Top Rated - Series", "series", "imdbRating")
+        ]
+
+        var catalogs: [NuvioCatalog] = []
+        for spec in specs {
+            let page = try await fetchCatalog(type: spec.type, catalogId: spec.catalogId, skip: nil, search: nil, genre: nil)
+            page.forEach { cachedMetaById[$0.id] = $0 }
+            catalogs.append(
+                NuvioCatalog(
+                    id: spec.id,
+                    name: spec.name,
+                    description: spec.name,
+                    itemIds: page.map(\.id),
+                    contentType: spec.type,
+                    catalogId: spec.catalogId
+                )
+            )
+        }
+        return catalogs
+    }
+
+    func getMetadata(id: String, type: String) async throws -> NuvioMeta {
+        if let cached = cachedMetaById[id] {
+            return cached
+        }
+
+        // Query the correct endpoint based on the caller-provided type. The
+        // Details screen uses a fresh repository (empty cache) so this always
+        // fetches the full /meta payload — real episodes and per-episode ratings.
+        let metaType = Self.isSeriesType(type) ? "series" : "movie"
+        let url = baseURL.appendingPathComponent("meta/\(metaType)/\(id).json")
+        let response: CinemetaMetaResponse = try await fetch(url)
+        let meta = response.meta.toMeta(fallbackType: metaType)
+        cachedMetaById[meta.id] = meta
+        return meta
+    }
+
+    private static func isSeriesType(_ type: String) -> Bool {
+        ["series", "show", "tv", "tvshow"].contains(type.lowercased())
+    }
+
+    private static var configuredStreamAddonManifestURL: URL? {
+        let rawValue = ProfileSettings.current
+            .string(forKey: SettingsKey.streamAddonManifestURL)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !rawValue.isEmpty else { return nil }
+
+        let normalizedValue = rawValue.contains("://") ? rawValue : "https://\(rawValue)"
+        guard let url = URL(string: normalizedValue),
+              let scheme = url.scheme?.lowercased(),
+              ["http", "https"].contains(scheme),
+              url.host != nil else {
+            return nil
+        }
+        return url
+    }
+
+    private static func streamAddonName(for manifestURL: URL) -> String {
+        guard let host = manifestURL.host?.replacingOccurrences(of: "www.", with: ""),
+              !host.isEmpty else {
+            return "Custom Stream Add-on"
+        }
+        if host.localizedCaseInsensitiveContains("aiostreams") {
+            return "AIOStreams"
+        }
+        return host
+    }
+
+    func getStreams(id: String, type: String) async throws -> [NuvioStream] {
+        var addonStreams: [NuvioStream] = []
+
+        for addon in streamAddons {
+            do {
+                let response: StremioStreamResponse = try await fetch(addon.streamURL(type: type, id: id))
+                addonStreams += response.streams.compactMap { stream in
+                    stream.toNuvioStream(addonName: addon.name)
+                }
+            } catch {
+                print("Failed to load streams from \(addon.name): \(error.localizedDescription)")
+            }
+        }
+
+        if !addonStreams.isEmpty {
+            let addonSubtitles = await fetchSubtitleAddons(id: id, type: type)
+            if !addonSubtitles.isEmpty {
+                addonStreams = addonStreams.map { stream in
+                    NuvioStream(
+                        url: stream.url,
+                        name: stream.name,
+                        description: stream.description,
+                        addonName: stream.addonName,
+                        subtitles: Self.mergedSubtitles(stream.subtitles, addonSubtitles)
+                    )
+                }
+            }
+            return Array(addonStreams.prefix(80))
+        }
+
+        return [
+            NuvioStream(
+                url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                name: "Sample Stream",
+                description: "Direct 1080p fallback stream",
+                addonName: "Nuvio Sample"
+            )
+        ]
+    }
+
+    private func fetchSubtitleAddons(id: String, type: String) async -> [NuvioSubtitle] {
+        let subtitleType = Self.isSeriesType(type) ? "series" : "movie"
+        var subtitles: [NuvioSubtitle] = []
+
+        for addon in subtitleAddons {
+            do {
+                let response: StremioSubtitleResponse = try await fetch(addon.subtitleURL(type: subtitleType, id: id))
+                subtitles += response.subtitles.compactMap { $0.toNuvioSubtitle() }
+            } catch {
+                print("Failed to load subtitles from \(addon.name): \(error.localizedDescription)")
+            }
+        }
+
+        return Self.uniqueSubtitles(subtitles)
+    }
+
+    private static func mergedSubtitles(_ lhs: [NuvioSubtitle], _ rhs: [NuvioSubtitle]) -> [NuvioSubtitle] {
+        uniqueSubtitles(lhs + rhs)
+    }
+
+    private static func uniqueSubtitles(_ subtitles: [NuvioSubtitle]) -> [NuvioSubtitle] {
+        var seen: Set<String> = []
+        return subtitles.filter { subtitle in
+            seen.insert(subtitle.url).inserted
+        }
+    }
+
+    func search(query: String) async throws -> [NuvioMeta] {
+        guard !query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return [] }
+        async let movies = fetchCatalog(type: "movie", catalogId: "top", skip: nil, search: query, genre: nil)
+        async let series = fetchCatalog(type: "series", catalogId: "top", skip: nil, search: query, genre: nil)
+        let results = try await movies + series
+        results.forEach { cachedMetaById[$0.id] = $0 }
+        return results
+    }
+
+    func browseCatalog(
+        contentType: String,
+        catalogId: String,
+        page: Int,
+        genre: String?,
+        year: Int?,
+        sort: String?
+    ) async throws -> CatalogPage {
+        let resolvedCatalogId = sort ?? catalogId
+        let skip = max(page - 1, 0) * 100
+        let items = try await fetchCatalog(
+            type: contentType,
+            catalogId: resolvedCatalogId,
+            skip: skip == 0 ? nil : skip,
+            search: nil,
+            genre: genre
+        )
+        items.forEach { cachedMetaById[$0.id] = $0 }
+        return CatalogPage(
+            items: items,
+            hasMore: !items.isEmpty,
+            page: page,
+            nextSkip: skip + items.count
+        )
+    }
+
+    func browseCatalog(
+        contentType: String,
+        catalogId: String,
+        skip: Int,
+        genre: String?
+    ) async throws -> CatalogPage {
+        let items = try await fetchCatalog(
+            type: contentType,
+            catalogId: catalogId,
+            skip: skip == 0 ? nil : skip,
+            search: nil,
+            genre: genre
+        )
+        items.forEach { cachedMetaById[$0.id] = $0 }
+        return CatalogPage(
+            items: items,
+            hasMore: !items.isEmpty,
+            page: 1,
+            nextSkip: skip + items.count
+        )
+    }
+
+    func getGenres(contentType: String) async throws -> [String] {
+        genres
+    }
+
+    private func fetchCatalog(
+        type: String,
+        catalogId: String,
+        skip: Int?,
+        search: String?,
+        genre: String?
+    ) async throws -> [NuvioMeta] {
+        var path = "catalog/\(type)/\(catalogId)"
+        let extras = [
+            search.flatMap { encodedExtra(name: "search", value: $0) },
+            genre.flatMap { encodedExtra(name: "genre", value: $0) },
+            skip.map { "skip=\($0)" }
+        ].compactMap { $0 }
+
+        if !extras.isEmpty {
+            path += "/" + extras.joined(separator: "&")
+        }
+        path += ".json"
+
+        let response: CinemetaCatalogResponse = try await fetch(baseURL.appendingPathComponent(path))
+        return response.metas.map { $0.toMeta(fallbackType: type) }
+    }
+
+    private func encodedExtra(name: String, value: String) -> String? {
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let encoded = trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+        return "\(name)=\(encoded)"
+    }
+
+    private func fetch<T: Decodable>(_ url: URL) async throws -> T {
+        let (data, response) = try await URLSession.shared.data(from: url)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+        return try decoder.decode(T.self, from: data)
+    }
+}
+
+private struct CinemetaCatalogResponse: Decodable {
+    let metas: [CinemetaMeta]
+}
+
+private struct CinemetaMetaResponse: Decodable {
+    let meta: CinemetaMeta
+}
+
+private struct StremioStreamAddon {
+    let name: String
+    let manifestURL: URL
+
+    func streamURL(type: String, id: String) -> URL {
+        manifestURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("stream")
+            .appendingPathComponent(type)
+            .appendingPathComponent("\(id).json")
+    }
+}
+
+private struct StremioSubtitleAddon {
+    let name: String
+    let manifestURL: URL
+
+    func subtitleURL(type: String, id: String) -> URL {
+        manifestURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("subtitles")
+            .appendingPathComponent(type)
+            .appendingPathComponent("\(id).json")
+    }
+}
+
+private struct StremioStreamResponse: Decodable {
+    let streams: [StremioStream]
+}
+
+private struct StremioSubtitleResponse: Decodable {
+    let subtitles: [StremioStreamSubtitle]
+}
+
+private struct StremioStream: Decodable {
+    let url: String?
+    let externalUrl: String?
+    let name: String?
+    let title: String?
+    let description: String?
+    let subtitles: [StremioStreamSubtitle]?
+    let behaviorHints: StremioStreamBehaviorHints?
+
+    func toNuvioStream(addonName: String) -> NuvioStream? {
+        guard let streamURL = cleaned(url) ?? cleaned(externalUrl) else { return nil }
+
+        let displayName = cleaned(name) ?? cleaned(title) ?? "Stream"
+        var detailLines: [String] = []
+
+        if let title = cleaned(title), title != displayName {
+            detailLines.append(title)
+        }
+        if let description = cleaned(description) {
+            detailLines.append(description)
+        } else if let size = behaviorHints?.videoSize {
+            detailLines.append("Size \(Self.sizeFormatter.string(fromByteCount: size))")
+        }
+
+        return NuvioStream(
+            url: streamURL,
+            name: displayName,
+            description: detailLines.joined(separator: "\n"),
+            addonName: addonName,
+            subtitles: subtitles?.compactMap { $0.toNuvioSubtitle() } ?? []
+        )
+    }
+
+    private func cleaned(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static let sizeFormatter: ByteCountFormatter = {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useGB, .useMB]
+        formatter.countStyle = .file
+        return formatter
+    }()
+}
+
+private struct StremioStreamSubtitle: Decodable {
+    let url: String?
+    let language: String?
+    let lang: String?
+    let title: String?
+    let name: String?
+    let id: String?
+
+    func toNuvioSubtitle() -> NuvioSubtitle? {
+        guard let subtitleURL = cleaned(url) else { return nil }
+        let subtitleLanguage = cleaned(language) ?? cleaned(lang) ?? "Unknown"
+        return NuvioSubtitle(
+            url: subtitleURL,
+            language: subtitleLanguage,
+            label: cleaned(title) ?? cleaned(name) ?? cleaned(id)
+        )
+    }
+
+    private func cleaned(_ value: String?) -> String? {
+        guard let value else { return nil }
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
+private struct StremioStreamBehaviorHints: Decodable {
+    let videoSize: Int64?
+}
+
+private struct CinemetaMeta: Decodable {
+    let id: String
+    let name: String
+    let type: String?
+    let description: String?
+    let poster: String?
+    let background: String?
+    let logo: String?
+    let imdbRating: String?
+    let genres: [String]?
+    let genre: [String]?
+    let releaseInfo: String?
+    let year: String?
+    let runtime: String?
+    let cast: [String]?
+    let director: [String]?
+    let writer: [String]?
+    let country: String?
+    let released: String?
+    let moviedbId: Int?
+    let status: String?
+    let videos: [CinemetaVideo]?
+
+    enum CodingKeys: String, CodingKey {
+        case id, name, type, description, poster, background, logo, imdbRating
+        case genres, genre, releaseInfo, year, runtime, cast, director, writer, country, released
+        case status, videos
+        case moviedbId = "moviedb_id"
+    }
+
+    func toMeta(fallbackType: String) -> NuvioMeta {
+        NuvioMeta(
+            id: id,
+            name: name,
+            description: description,
+            posterUrl: poster,
+            backgroundUrl: background,
+            logoUrl: logo,
+            imdbId: id.hasPrefix("tt") ? id : nil,
+            tmdbId: moviedbId,
+            type: type ?? fallbackType,
+            year: parsedYear,
+            genres: genres ?? genre,
+            rating: Double(imdbRating ?? ""),
+            releaseInfo: releaseInfo ?? year,
+            runtime: runtime,
+            cast: cast,
+            director: director,
+            writer: writer,
+            certification: nil,
+            country: country,
+            released: released,
+            status: status,
+            videos: videos?.compactMap { $0.toVideo() }
+        )
+    }
+
+    private var parsedYear: Int? {
+        let source = releaseInfo ?? year ?? released
+        guard let source else { return nil }
+        let digits = source.prefix(4)
+        return Int(digits)
+    }
+}
+
+private struct CinemetaVideo: Decodable {
+    let id: String?
+    let name: String?
+    let title: String?
+    let season: Int?
+    let episode: Int?
+    let number: Int?
+    let thumbnail: String?
+    let overview: String?
+    let description: String?
+    let released: String?
+    let firstAired: String?
+    // Cinemeta's /meta endpoint sends rating as a String ("7.7"), but its
+    // catalog endpoint sends it as a number — decode either form.
+    let rating: FlexibleString?
+
+    func toVideo() -> NuvioVideo? {
+        // Skip entries without a usable season/episode (e.g. malformed extras).
+        guard let season, let episodeNumber = episode ?? number else { return nil }
+        return NuvioVideo(
+            id: id ?? "\(season):\(episodeNumber)",
+            title: name ?? title ?? "Episode \(episodeNumber)",
+            season: season,
+            episode: episodeNumber,
+            thumbnail: thumbnail,
+            overview: overview ?? description,
+            released: released ?? firstAired,
+            rating: normalizedRating
+        )
+    }
+
+    /// Drop empty / zero ratings (catalog entries report "0") so the UI can fall
+    /// back to the series-level rating instead of showing a meaningless 0.
+    private var normalizedRating: String? {
+        guard let raw = rating?.value.trimmingCharacters(in: .whitespaces), !raw.isEmpty else { return nil }
+        if let numeric = Double(raw), numeric <= 0 { return nil }
+        return raw
+    }
+}
+
+/// Decodes a JSON value that may arrive as either a string or a number.
+private struct FlexibleString: Decodable {
+    let value: String
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let string = try? container.decode(String.self) {
+            value = string
+        } else if let double = try? container.decode(Double.self) {
+            value = double == double.rounded() ? String(Int(double)) : String(double)
+        } else {
+            value = ""
+        }
+    }
+}
+
+/// Mock implementation for testing without Rust SDK
+class MockCatalogRepository: CatalogRepository {
+
+    // Mock data
+    private let mockGenres = [
+        "action", "adventure", "animation", "biography", "comedy",
+        "crime", "documentary", "drama", "family", "fantasy",
+        "film-noir", "history", "horror", "music", "musical",
+        "mystery", "romance", "sci-fi", "sport", "thriller",
+        "war", "western"
+    ]
+
+    private func generateMockMeta(id: String, type: String) -> NuvioMeta {
+        let genres = mockGenres.shuffled().prefix(Int.random(in: 2...4))
+        return NuvioMeta(
+            id: id,
+            name: "Sample \(type.capitalized) \(id)",
+            description: "This is a sample \(type) with ID \(id). Lorem ipsum dolor sit amet, consectetur adipiscing elit.",
+            posterUrl: "https://via.placeholder.com/300x450/1a1a1a/ffffff?text=\(type)+\(id)",
+            backgroundUrl: "https://via.placeholder.com/1920x1080/1a1a1a/ffffff?text=BG",
+            logoUrl: nil,
+            imdbId: "tt\(String(format: "%07d", Int.random(in: 1...9999999)))",
+            tmdbId: Int.random(in: 1...999999),
+            type: type,
+            year: Int.random(in: 2010...2024),
+            genres: Array(genres),
+            rating: Double.random(in: 6.0...9.5),
+            releaseInfo: nil,
+            runtime: "\(Int.random(in: 90...180)) min",
+            cast: ["Actor 1", "Actor 2", "Actor 3"],
+            director: ["Director Name"],
+            writer: ["Writer Name"],
+            certification: "PG-13",
+            country: "USA",
+            released: nil
+        )
+    }
+
+    func getHomeCatalogs() async throws -> [NuvioCatalog] {
+        // Simulate network delay
+        try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+
+        return [
+            NuvioCatalog(
+                id: "trending_movies",
+                name: "Trending Movies",
+                description: "Popular movies right now",
+                itemIds: (1...20).map { "movie_\($0)" },
+                contentType: "movie",
+                catalogId: "top"
+            ),
+            NuvioCatalog(
+                id: "trending_series",
+                name: "Trending Series",
+                description: "Popular series right now",
+                itemIds: (1...20).map { "series_\($0)" },
+                contentType: "series",
+                catalogId: "top"
+            )
+        ]
+    }
+
+    func getMetadata(id: String, type: String) async throws -> NuvioMeta {
+        // Simulate network delay
+        try await Task.sleep(nanoseconds: 300_000_000) // 0.3 seconds
+
+        let resolvedType = type.isEmpty ? (id.hasPrefix("movie") ? "movie" : "series") : type
+        return generateMockMeta(id: id, type: resolvedType)
+    }
+
+    func getStreams(id: String, type: String) async throws -> [NuvioStream] {
+        // Simulate network delay
+        try await Task.sleep(nanoseconds: 500_000_000) // 0.5 seconds
+
+        return [
+            NuvioStream(
+                url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                name: "HD Stream",
+                description: "1080p",
+                addonName: "Sample Addon"
+            ),
+            NuvioStream(
+                url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                name: "4K Stream",
+                description: "2160p",
+                addonName: "Sample Addon"
+            )
+        ]
+    }
+
+    func search(query: String) async throws -> [NuvioMeta] {
+        // Simulate network delay
+        try await Task.sleep(nanoseconds: 400_000_000) // 0.4 seconds
+
+        guard !query.isEmpty else { return [] }
+
+        // Return mock search results
+        let movieResults = (1...5).map { generateMockMeta(id: "search_movie_\($0)", type: "movie") }
+        let seriesResults = (1...5).map { generateMockMeta(id: "search_series_\($0)", type: "series") }
+
+        return movieResults + seriesResults
+    }
+
+    func browseCatalog(
+        contentType: String,
+        catalogId: String,
+        page: Int,
+        genre: String?,
+        year: Int?,
+        sort: String?
+    ) async throws -> CatalogPage {
+        // Simulate network delay
+        try await Task.sleep(nanoseconds: 600_000_000) // 0.6 seconds
+
+        // Generate 20 items per page (standard pagination size)
+        let startIndex = (page - 1) * 20 + 1
+        let endIndex = page * 20
+
+        let items = (startIndex...endIndex).map { index in
+            var meta = generateMockMeta(id: "\(contentType)_\(index)", type: contentType)
+
+            // Filter by genre if specified
+            if let genre = genre {
+                meta = NuvioMeta(
+                    id: meta.id,
+                    name: meta.name,
+                    description: meta.description,
+                    posterUrl: meta.posterUrl,
+                    backgroundUrl: meta.backgroundUrl,
+                    logoUrl: meta.logoUrl,
+                    imdbId: meta.imdbId,
+                    tmdbId: meta.tmdbId,
+                    type: meta.type,
+                    year: meta.year,
+                    genres: [genre] + (meta.genres?.filter { $0 != genre } ?? []),
+                    rating: meta.rating,
+                    releaseInfo: meta.releaseInfo,
+                    runtime: meta.runtime,
+                    cast: meta.cast,
+                    director: meta.director,
+                    writer: meta.writer,
+                    certification: meta.certification,
+                    country: meta.country,
+                    released: meta.released
+                )
+            }
+
+            // Filter by year if specified
+            if let year = year {
+                meta = NuvioMeta(
+                    id: meta.id,
+                    name: meta.name,
+                    description: meta.description,
+                    posterUrl: meta.posterUrl,
+                    backgroundUrl: meta.backgroundUrl,
+                    logoUrl: meta.logoUrl,
+                    imdbId: meta.imdbId,
+                    tmdbId: meta.tmdbId,
+                    type: meta.type,
+                    year: year,
+                    genres: meta.genres,
+                    rating: meta.rating,
+                    releaseInfo: meta.releaseInfo,
+                    runtime: meta.runtime,
+                    cast: meta.cast,
+                    director: meta.director,
+                    writer: meta.writer,
+                    certification: meta.certification,
+                    country: meta.country,
+                    released: meta.released
+                )
+            }
+
+            return meta
+        }
+
+        // Simulate having more pages (limit to 5 pages for demo)
+        let hasMore = page < 5
+
+        return CatalogPage(
+            items: items,
+            hasMore: hasMore,
+            page: page,
+            nextSkip: page * 20
+        )
+    }
+
+    func browseCatalog(
+        contentType: String,
+        catalogId: String,
+        skip: Int,
+        genre: String?
+    ) async throws -> CatalogPage {
+        try await Task.sleep(nanoseconds: 600_000_000)
+
+        let startIndex = skip + 1
+        let endIndex = skip + 20
+        let items = (startIndex...endIndex).map { index in
+            generateMockMeta(id: "\(contentType)_\(index)", type: contentType)
+        }
+
+        return CatalogPage(
+            items: items,
+            hasMore: skip + items.count < 100,
+            page: (skip / 20) + 1,
+            nextSkip: skip + items.count
+        )
+    }
+
+    func getGenres(contentType: String) async throws -> [String] {
+        // Simulate network delay
+        try await Task.sleep(nanoseconds: 200_000_000) // 0.2 seconds
+
+        return mockGenres
+    }
+}

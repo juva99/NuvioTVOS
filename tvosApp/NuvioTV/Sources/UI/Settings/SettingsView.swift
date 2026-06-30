@@ -1,0 +1,2233 @@
+import SwiftUI
+
+private enum SettingsCategory: String, CaseIterable, Identifiable {
+    case account = "Account & Profiles"
+    case appearance = "Appearance"
+    case layout = "Layout & Discovery"
+    case integrations = "Integrations"
+    case playback = "Playback"
+    case subtitles = "Subtitle Style"
+    case advanced = "Advanced"
+    case about = "About"
+
+    var id: String { rawValue }
+
+    var subtitle: String {
+        switch self {
+        case .account: return "Profile identity and local account preferences"
+        case .appearance: return "Theme, language, and display comfort"
+        case .layout: return "Home rows, discovery, posters, and metadata"
+        case .integrations: return "Trakt, TMDB, MDBList, and debrid keys"
+        case .playback: return "Player, subtitles, audio, trailers, and cache"
+        case .subtitles: return "How subtitles look on every video you watch"
+        case .advanced: return "Focus behavior, diagnostics, and reset tools"
+        case .about: return "Version, engine, and open-source notices"
+        }
+    }
+
+    var iconName: String {
+        switch self {
+        case .account: return "person.crop.circle"
+        case .appearance: return "paintpalette"
+        case .layout: return "rectangle.grid.2x2"
+        case .integrations: return "link"
+        case .playback: return "play.circle"
+        case .subtitles: return "captions.bubble"
+        case .advanced: return "wrench.and.screwdriver"
+        case .about: return "info.circle"
+        }
+    }
+}
+
+enum SettingsKey {
+    static let profileName = "nuvio.tv.settings.profile.name"
+    static let profilePinEnabled = "nuvio.tv.settings.profile.pinEnabled"
+    static let profileAutoSelectLast = "nuvio.tv.settings.profile.autoSelectLast"
+    static let accountSyncWatchState = "nuvio.tv.settings.account.syncWatchState"
+
+    static let theme = "nuvio.tv.settings.appearance.theme"
+    static let bodyColor = "nuvio.tv.settings.appearance.bodyColor"
+    static let font = "nuvio.tv.settings.appearance.font"
+    static let language = "nuvio.tv.settings.appearance.language"
+    static let amoled = "nuvio.tv.settings.appearance.amoled"
+    static let amoledSurfaces = "nuvio.tv.settings.appearance.amoledSurfaces"
+    static let reduceMotion = "nuvio.tv.settings.appearance.reduceMotion"
+
+    static let homeLayout = "nuvio.tv.settings.layout.homeLayout"
+    static let heroEnabled = "nuvio.tv.settings.layout.heroEnabled"
+    static let posterLabels = "nuvio.tv.settings.layout.posterLabels"
+    static let catalogAddonNames = "nuvio.tv.settings.layout.catalogAddonNames"
+    static let discoverLocation = "nuvio.tv.settings.layout.discoverLocation"
+    static let continueWatchingSort = "nuvio.tv.settings.layout.continueWatchingSort"
+    static let hideUnreleased = "nuvio.tv.settings.layout.hideUnreleased"
+    static let showFullDates = "nuvio.tv.settings.layout.showFullDates"
+
+    static let traktConnected = "nuvio.tv.settings.integrations.traktConnected"
+    static let tmdbEnabled = "nuvio.tv.settings.integrations.tmdbEnabled"
+    static let tmdbApiKey = "nuvio.tv.settings.integrations.tmdbApiKey"
+    static let mdbListEnabled = "nuvio.tv.settings.integrations.mdbListEnabled"
+    static let mdbListApiKey = "nuvio.tv.settings.integrations.mdbListApiKey"
+    static let debridProvider = "nuvio.tv.settings.integrations.debridProvider"
+    static let debridApiKey = "nuvio.tv.settings.integrations.debridApiKey"
+    static let streamAddonManifestURL = "nuvio.tv.settings.integrations.streamAddonManifestURL"
+
+    static let playerEngine = "nuvio.tv.settings.playback.playerEngine"
+    static let smartStreamSelection = "nuvio.tv.settings.playback.smartStreamSelection"
+    static let smartStreamQuality = "nuvio.tv.settings.playback.smartStreamQuality"
+    static let smartSubtitleMatching = "nuvio.tv.settings.playback.smartSubtitleMatching"
+    static let autoPlayNext = "nuvio.tv.settings.playback.autoPlayNext"
+    static let trailersEnabled = "nuvio.tv.settings.playback.trailersEnabled"
+    static let trailerDelay = "nuvio.tv.settings.playback.trailerDelay"
+    static let audioLanguage = "nuvio.tv.settings.playback.audioLanguage"
+    static let subtitleLanguage = "nuvio.tv.settings.playback.subtitleLanguage"
+    static let subtitleLanguageSecondary = "nuvio.tv.settings.playback.subtitleLanguage.secondary"
+    static let subtitleLanguageTertiary = "nuvio.tv.settings.playback.subtitleLanguage.tertiary"
+    static let forcedSubtitles = "nuvio.tv.settings.playback.forcedSubtitles"
+    static let subtitleSize = "nuvio.tv.settings.playback.subtitleSize"
+    static let frameRateMatching = "nuvio.tv.settings.playback.frameRateMatching"
+    static let networkCache = "nuvio.tv.settings.playback.networkCache"
+
+    static let fastNavigation = "nuvio.tv.settings.advanced.fastNavigation"
+    static let smoothFocus = "nuvio.tv.settings.advanced.smoothFocus"
+    static let playbackDiagnostics = "nuvio.tv.settings.advanced.playbackDiagnostics"
+    static let focusHighlighter = "nuvio.tv.settings.advanced.focusHighlighter"
+
+    static let all = [
+        profileName, profilePinEnabled, profileAutoSelectLast, accountSyncWatchState,
+        theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
+        homeLayout, heroEnabled, posterLabels, catalogAddonNames, discoverLocation,
+        continueWatchingSort, hideUnreleased, showFullDates,
+        traktConnected, tmdbEnabled, tmdbApiKey, mdbListEnabled, mdbListApiKey,
+        debridProvider, debridApiKey, streamAddonManifestURL,
+        playerEngine, smartStreamSelection, smartStreamQuality, smartSubtitleMatching,
+        autoPlayNext, trailersEnabled, trailerDelay, audioLanguage,
+        subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
+        forcedSubtitles, subtitleSize, frameRateMatching, networkCache,
+        fastNavigation, smoothFocus, playbackDiagnostics, focusHighlighter
+    ] + SubtitleStyleKey.all
+}
+
+// MARK: - Subtitle styling (applied to every MPV playback session)
+
+enum SubtitleStyleKey {
+    static let textSize = "nuvio.tv.settings.subtitleStyle.textSize"
+    static let bold = "nuvio.tv.settings.subtitleStyle.bold"
+    static let bottomOffset = "nuvio.tv.settings.subtitleStyle.bottomOffset"
+    static let horizontalMargin = "nuvio.tv.settings.subtitleStyle.horizontalMargin"
+    static let letterSpacing = "nuvio.tv.settings.subtitleStyle.letterSpacing"
+    static let textColor = "nuvio.tv.settings.subtitleStyle.textColor"
+    static let textOpacity = "nuvio.tv.settings.subtitleStyle.textOpacity"
+    static let outlineEnabled = "nuvio.tv.settings.subtitleStyle.outlineEnabled"
+    static let outlineColor = "nuvio.tv.settings.subtitleStyle.outlineColor"
+
+    static let all = [
+        textSize, bold, bottomOffset, horizontalMargin, letterSpacing,
+        textColor, textOpacity, outlineEnabled, outlineColor
+    ]
+}
+
+enum SubtitleStyleDefaults {
+    static let textSize = 100        // percent, 60...220
+    static let bold = false
+    static let bottomOffset = 20     // 0...160, raises subtitles off the bottom edge
+    static let horizontalMargin = 25 // 0...200, left+right inset (mpv default is 25)
+    static let letterSpacing = 0     // -8...40, negative squeezes, positive opens the text
+    static let textColor = "#FFFFFF"
+    static let textOpacity = 100     // percent, 20...100
+    static let outlineEnabled = true
+    static let outlineColor = "#000000"
+}
+
+/// Curated swatch palette shared by the text-color and outline-color pickers.
+enum SubtitlePalette {
+    static let colors: [String] = [
+        "#FFFFFF", "#F2C94C", "#56CCF2", "#EB5757", "#6FCF97",
+        "#9B51E0", "#F2994A", "#27AE60", "#2F80ED", "#000000"
+    ]
+}
+
+/// Snapshot of the persisted subtitle appearance. Read by the player to style
+/// every libmpv session and by the settings live preview. Defaults mirror
+/// `SubtitleStyleDefaults` so a fresh install renders white, outlined captions.
+struct SubtitleStyle {
+    var textSize: Int
+    var bold: Bool
+    var bottomOffset: Int
+    var horizontalMargin: Int
+    var letterSpacing: Int
+    var textColorHex: String
+    var textOpacity: Int
+    var outlineEnabled: Bool
+    var outlineColorHex: String
+
+    static var current: SubtitleStyle {
+        let defaults = ProfileSettings.current
+        func intValue(_ key: String, _ fallback: Int) -> Int {
+            defaults.object(forKey: key) == nil ? fallback : defaults.integer(forKey: key)
+        }
+        func boolValue(_ key: String, _ fallback: Bool) -> Bool {
+            defaults.object(forKey: key) == nil ? fallback : defaults.bool(forKey: key)
+        }
+        func stringValue(_ key: String, _ fallback: String) -> String {
+            defaults.string(forKey: key) ?? fallback
+        }
+        return SubtitleStyle(
+            textSize: intValue(SubtitleStyleKey.textSize, SubtitleStyleDefaults.textSize),
+            bold: boolValue(SubtitleStyleKey.bold, SubtitleStyleDefaults.bold),
+            bottomOffset: intValue(SubtitleStyleKey.bottomOffset, SubtitleStyleDefaults.bottomOffset),
+            horizontalMargin: intValue(SubtitleStyleKey.horizontalMargin, SubtitleStyleDefaults.horizontalMargin),
+            letterSpacing: intValue(SubtitleStyleKey.letterSpacing, SubtitleStyleDefaults.letterSpacing),
+            textColorHex: stringValue(SubtitleStyleKey.textColor, SubtitleStyleDefaults.textColor),
+            textOpacity: intValue(SubtitleStyleKey.textOpacity, SubtitleStyleDefaults.textOpacity),
+            outlineEnabled: boolValue(SubtitleStyleKey.outlineEnabled, SubtitleStyleDefaults.outlineEnabled),
+            outlineColorHex: stringValue(SubtitleStyleKey.outlineColor, SubtitleStyleDefaults.outlineColor)
+        )
+    }
+
+    // MARK: libmpv property mapping
+
+    /// `sub-scale` — relative subtitle text size.
+    var subScale: Double { min(max(Double(textSize) / 100.0, 0.4), 3.0) }
+    /// `sub-margin-y` — lifts captions off the bottom edge (22 is mpv's default).
+    var subMarginY: Int { 22 + min(max(bottomOffset, 0), 160) }
+    /// `sub-margin-x` — left+right screen inset in scaled pixels.
+    var subMarginX: Int { min(max(horizontalMargin, 0), 200) }
+    /// `sub-spacing` — extra letter spacing; negative squeezes, positive opens.
+    var subSpacing: Int { min(max(letterSpacing, -8), 40) }
+    /// `sub-outline-size` — 0 collapses the border entirely.
+    var subOutlineSize: Double { outlineEnabled ? 3.0 : 0.0 }
+    /// `sub-color` — `#AARRGGBB`, alpha carries Text Opacity.
+    var subColor: String { Self.mpvColor(hex: textColorHex, opacity: textOpacity) }
+    /// `sub-outline-color` — always fully opaque.
+    var subOutlineColor: String { Self.mpvColor(hex: outlineColorHex, opacity: 100) }
+
+    /// mpv expects colors as `#AARRGGBB`. Opacity is a 0–100 percentage.
+    static func mpvColor(hex: String, opacity: Int) -> String {
+        let raw = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        let rgb = raw.count >= 6 ? String(raw.prefix(6)) : "FFFFFF"
+        let alpha = Int((Double(min(max(opacity, 0), 100)) / 100.0 * 255.0).rounded())
+        return String(format: "#%02X%@", alpha, rgb.uppercased())
+    }
+}
+
+enum SubtitleLanguagePreferences {
+    static let disabledValues = ["System", "None"]
+
+    static func ordered(primary: String, secondary: String, tertiary: String) -> [String] {
+        var seen: Set<String> = []
+        return [primary, secondary, tertiary]
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { language in
+                !language.isEmpty &&
+                !disabledValues.contains(language) &&
+                seen.insert(language).inserted
+            }
+    }
+
+    static func orderedFromDefaults() -> [String] {
+        let defaults = ProfileSettings.current
+        return ordered(
+            primary: defaults.string(forKey: SettingsKey.subtitleLanguage) ?? "System",
+            secondary: defaults.string(forKey: SettingsKey.subtitleLanguageSecondary) ?? "None",
+            tertiary: defaults.string(forKey: SettingsKey.subtitleLanguageTertiary) ?? "None"
+        )
+    }
+
+    static func matches(_ languageText: String?, target: String) -> Bool {
+        guard let languageText else { return false }
+        let text = languageText.lowercased()
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if exactCodes(for: target).contains(normalized) { return true }
+        return aliases(for: target).contains { alias in
+            text.contains(alias)
+        }
+    }
+
+    static func exactCodes(for language: String) -> [String] {
+        switch language {
+        case "Arabic": return ["ara", "ar"]
+        case "English": return ["eng", "en"]
+        case "Norwegian": return ["nor", "nb", "no"]
+        case "Spanish": return ["spa", "es"]
+        case "French": return ["fre", "fra", "fr"]
+        case "German": return ["ger", "deu", "de"]
+        case "Japanese": return ["jpn", "ja"]
+        default: return [language.lowercased()]
+        }
+    }
+
+    static func aliases(for language: String) -> [String] {
+        switch language {
+        case "Arabic": return ["arabic", " ara ", "[ara]", "(ara)", ".ara.", "_ara_", "-ara-", " ar ", "[ar]", "(ar)", ".ar.", "_ar_", "-ar-"]
+        case "English": return ["english", " eng ", "[eng]", "(eng)", ".eng.", "_eng_", "-eng-", " en ", "[en]", "(en)", ".en.", "_en_", "-en-"]
+        case "Norwegian": return ["norwegian", " nor ", "[nor]", "(nor)", ".nor.", "_nor_", "-nor-", " nb ", "[nb]", "(nb)", ".nb.", "_nb_", "-nb-", " no ", "[no]", "(no)", ".no.", "_no_", "-no-"]
+        case "Spanish": return ["spanish", " spa ", "[spa]", "(spa)", ".spa.", "_spa_", "-spa-", " es ", "[es]", "(es)", ".es.", "_es_", "-es-"]
+        case "French": return ["french", " fre ", " fra ", "[fre]", "[fra]", "(fre)", "(fra)", ".fre.", ".fra.", " fr ", "[fr]", "(fr)", ".fr.", "_fr_", "-fr-"]
+        case "German": return ["german", " ger ", " deu ", "[ger]", "[deu]", "(ger)", "(deu)", ".ger.", ".deu.", " de ", "[de]", "(de)", ".de.", "_de_", "-de-"]
+        case "Japanese": return ["japanese", " jpn ", "[jpn]", "(jpn)", ".jpn.", "_jpn_", "-jpn-", " ja ", "[ja]", "(ja)", ".ja.", "_ja_", "-ja-"]
+        default: return [language.lowercased()]
+        }
+    }
+}
+
+enum SettingsAccent: String, CaseIterable, Identifiable {
+    case white = "White"
+    case sky = "Sky"
+    case emerald = "Emerald"
+    case rose = "Rose"
+    case amber = "Amber"
+    case violet = "Violet"
+
+    var id: String { rawValue }
+
+    var color: Color {
+        switch self {
+        case .white: return .white
+        case .sky: return Color(red: 0.25, green: 0.62, blue: 0.96)
+        case .emerald: return Color(red: 0.19, green: 0.78, blue: 0.48)
+        case .rose: return Color(red: 0.95, green: 0.31, blue: 0.48)
+        case .amber: return Color(red: 0.97, green: 0.72, blue: 0.26)
+        case .violet: return Color(red: 0.60, green: 0.45, blue: 0.95)
+        }
+    }
+
+    static func color(for rawValue: String) -> Color {
+        SettingsAccent(rawValue: rawValue)?.color ?? SettingsAccent.white.color
+    }
+}
+
+/// Dark background tints for the app body. Distinct from `SettingsAccent`
+/// (which are bright focus/accent colors unsuitable as a full-screen fill).
+enum SettingsBackground: String, CaseIterable, Identifiable {
+    case charcoal = "Charcoal"
+    case black = "Black"
+    case midnight = "Midnight"
+    case forest = "Forest"
+    case plum = "Plum"
+    case slate = "Slate"
+
+    var id: String { rawValue }
+
+    var color: Color {
+        switch self {
+        case .charcoal: return Color(red: 0.015, green: 0.015, blue: 0.018)
+        case .black: return .black
+        case .midnight: return Color(red: 0.020, green: 0.030, blue: 0.065)
+        case .forest: return Color(red: 0.018, green: 0.048, blue: 0.036)
+        case .plum: return Color(red: 0.045, green: 0.020, blue: 0.060)
+        case .slate: return Color(red: 0.040, green: 0.046, blue: 0.056)
+        }
+    }
+
+    /// A slightly brighter swatch fill so dark tints stay visible in the picker.
+    var swatchColor: Color {
+        switch self {
+        case .charcoal: return Color(red: 0.16, green: 0.16, blue: 0.18)
+        case .black: return Color(red: 0.07, green: 0.07, blue: 0.07)
+        case .midnight: return Color(red: 0.12, green: 0.18, blue: 0.34)
+        case .forest: return Color(red: 0.10, green: 0.28, blue: 0.20)
+        case .plum: return Color(red: 0.26, green: 0.12, blue: 0.34)
+        case .slate: return Color(red: 0.24, green: 0.27, blue: 0.32)
+        }
+    }
+
+    static func color(for rawValue: String) -> Color {
+        SettingsBackground(rawValue: rawValue)?.color ?? SettingsBackground.charcoal.color
+    }
+}
+
+struct SettingsView: View {
+    @State private var selectedCategory: SettingsCategory = .account
+    @State private var isSubtitleLanguagePickerPresented = false
+    @FocusState private var focusedCategory: SettingsCategory?
+    /// Mirrors the previously focused pill so we can tell a *return from the
+    /// detail pane* (previous focus was nil) apart from ordinary up/down moves
+    /// within the sidebar. Drives the left-press snap-back below.
+    @State private var lastFocusedCategory: SettingsCategory?
+    @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @AppStorage(SettingsKey.subtitleLanguage) private var subtitleLanguage = "System"
+    @AppStorage(SettingsKey.subtitleLanguageSecondary) private var subtitleLanguageSecondary = "None"
+    @AppStorage(SettingsKey.subtitleLanguageTertiary) private var subtitleLanguageTertiary = "None"
+
+    private let subtitlePickerLanguages = ["English", "Arabic", "Norwegian", "Spanish", "French", "German", "Japanese"]
+
+    private var accentColor: Color {
+        SettingsAccent.color(for: theme)
+    }
+
+    var body: some View {
+        ZStack {
+            HStack(spacing: 0) {
+                categoryGrid
+                    .focusSection()
+                    .defaultFocusIfAvailable($focusedCategory, selectedCategory)
+                    .onChange(of: focusedCategory) { newValue in
+                        let cameFromDetail = lastFocusedCategory == nil
+                        lastFocusedCategory = newValue
+                        // tvOS resolves a left-press out of the detail pane purely by
+                        // geometry, so it lands on whichever pill is vertically in
+                        // line with the focused row (e.g. Integrations) instead of the
+                        // open category. focusSection() only groups the sidebar for
+                        // entry — it doesn't restore the last-focused pill on a
+                        // directional move. So when focus comes back to the sidebar
+                        // from the detail (previous focus was nil), snap it onto the
+                        // selected category so "left" always returns to the open section.
+                        if cameFromDetail, let newValue, newValue != selectedCategory {
+                            focusedCategory = selectedCategory
+                        }
+                    }
+
+                Group {
+                    if selectedCategory == .subtitles {
+                        VStack(alignment: .leading, spacing: 28) {
+                            selectedCategoryHeader
+                            SubtitleStyleSettingsView(accentColor: accentColor)
+                        }
+                        .padding(.leading, 44)
+                        .padding(.trailing, 72)
+                        .padding(.vertical, 56)
+                    } else {
+                        ScrollView {
+                            VStack(alignment: .leading, spacing: 28) {
+                                selectedCategoryHeader
+                                selectedCategoryContent
+                            }
+                            .padding(.leading, 44)
+                            .padding(.trailing, 72)
+                            .padding(.vertical, 56)
+                        }
+                    }
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .focusSection()
+            }
+            .disabled(isSubtitleLanguagePickerPresented)
+            .allowsHitTesting(!isSubtitleLanguagePickerPresented)
+
+            if isSubtitleLanguagePickerPresented {
+                SubtitleLanguagePickerWindow(
+                    primary: $subtitleLanguage,
+                    secondary: $subtitleLanguageSecondary,
+                    tertiary: $subtitleLanguageTertiary,
+                    languages: subtitlePickerLanguages,
+                    accentColor: accentColor
+                ) {
+                    isSubtitleLanguagePickerPresented = false
+                }
+                .transition(.opacity.combined(with: .scale(scale: 0.96)))
+                .zIndex(1)
+            }
+        }
+        .background(Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea())
+        .animation(.easeOut(duration: 0.16), value: isSubtitleLanguagePickerPresented)
+    }
+
+    private var categoryGrid: some View {
+        VStack(alignment: .leading, spacing: 24) {
+            Text("Settings")
+                .font(.system(size: 42, weight: .bold))
+                .foregroundColor(.white)
+                .padding(.leading, 10)
+
+            VStack(alignment: .leading, spacing: 14) {
+                ForEach(SettingsCategory.allCases) { category in
+                    let isFocusedCategory = focusedCategory == category
+                    let isSelectedCategory = selectedCategory == category
+
+                    SettingsCategoryPill(
+                        category: category,
+                        isSelected: isSelectedCategory,
+                        isFocused: isFocusedCategory,
+                        accentColor: accentColor
+                    ) {
+                        selectedCategory = category
+                    }
+                    .focused($focusedCategory, equals: category)
+                }
+            }
+        }
+        .padding(.leading, 58)
+        .padding(.trailing, 22)
+        .padding(.top, 58)
+        .frame(width: 510)
+        .frame(maxHeight: .infinity, alignment: .topLeading)
+    }
+
+    private var selectedCategoryHeader: some View {
+        SettingsDetailHeader(
+            title: selectedCategory.rawValue,
+            subtitle: selectedCategory.subtitle,
+            iconName: selectedCategory.iconName,
+            accentColor: accentColor
+        )
+    }
+
+    @ViewBuilder
+    private var selectedCategoryContent: some View {
+        switch selectedCategory {
+        case .account:
+            AccountSettingsView(accentColor: accentColor)
+        case .appearance:
+            AppearanceSettingsView(accentColor: accentColor)
+        case .layout:
+            LayoutDiscoverySettingsView(accentColor: accentColor)
+        case .integrations:
+            IntegrationSettingsView(accentColor: accentColor)
+        case .playback:
+            PlaybackSettingsView(accentColor: accentColor) {
+                isSubtitleLanguagePickerPresented = true
+            }
+        case .subtitles:
+            SubtitleStyleSettingsView(accentColor: accentColor)
+        case .advanced:
+            AdvancedSettingsView(accentColor: accentColor)
+        case .about:
+            AboutSettingsView(accentColor: accentColor)
+        }
+    }
+}
+
+private struct SettingsCategoryPill: View {
+    let category: SettingsCategory
+    let isSelected: Bool
+    let isFocused: Bool
+    let accentColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 22) {
+                Image(systemName: category.iconName)
+                    .font(.system(size: 36, weight: .semibold))
+                    .foregroundColor(iconColor)
+                    .frame(width: 48, height: 48)
+
+                Text(category.rawValue)
+                    .font(.system(size: 30, weight: .bold))
+                    .foregroundColor(textColor)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.68)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .padding(.horizontal, 26)
+            .frame(width: 430, height: 92, alignment: .leading)
+            .modifier(SettingsCategoryPillBackground(isSelected: isSelected, isFocused: isFocused))
+            .overlay(
+                Capsule()
+                    .strokeBorder(borderColor, lineWidth: isFocused ? 3 : 1)
+            )
+            .animation(.easeOut(duration: 0.14), value: isSelected)
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focusEffectDisabledIfAvailable()
+        .scaleEffect(isFocused ? 1.06 : 1.0)
+        .zIndex(isFocused ? 1 : 0)
+        .animation(.easeOut(duration: 0.14), value: isFocused)
+    }
+
+    private var iconColor: Color {
+        if isFocused { return .black }
+        return isSelected ? .white.opacity(0.90) : .white.opacity(0.78)
+    }
+
+    private var textColor: Color {
+        if isFocused { return .black }
+        return isSelected ? .white.opacity(0.96) : .white.opacity(0.82)
+    }
+
+    private var borderColor: Color {
+        if isFocused {
+            return .clear
+        }
+        return Color.white.opacity(isSelected ? 0.14 : 0.07)
+    }
+}
+
+private struct SettingsCategoryPillBackground: ViewModifier {
+    let isSelected: Bool
+    let isFocused: Bool
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isFocused {
+            content.background(Color.white, in: Capsule())
+        } else if isSelected {
+            content.settingsGlass(shape: Capsule(), isProminent: true)
+        } else {
+            content.settingsGlass(shape: Capsule(), isProminent: false)
+        }
+    }
+}
+
+private struct AccountSettingsView: View {
+    let accentColor: Color
+
+    @AppStorage(SettingsKey.profileName) private var profileName = "Nuvio User"
+    @AppStorage(SettingsKey.profilePinEnabled) private var pinEnabled = false
+    @AppStorage(SettingsKey.profileAutoSelectLast) private var autoSelectLastProfile = true
+    @AppStorage(SettingsKey.accountSyncWatchState) private var syncWatchState = true
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(title: "Profile", subtitle: "Local profile defaults for this Apple TV") {
+                HStack(spacing: 22) {
+                    Circle()
+                        .fill(accentColor.opacity(0.86))
+                        .frame(width: 84, height: 84)
+                        .overlay(
+                            Text(profileInitial)
+                                .font(.system(size: 38, weight: .black))
+                                .foregroundColor(accentColor == .white ? .black : .white)
+                        )
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(profileName.isEmpty ? "Nuvio User" : profileName)
+                            .font(.system(size: 28, weight: .bold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+
+                        Text(pinEnabled ? "PIN protection enabled" : "PIN protection disabled")
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundColor(.white.opacity(0.58))
+                    }
+
+                    Spacer()
+                }
+                .padding(.bottom, 6)
+
+                SettingsTextFieldRow(
+                    title: "Profile Name",
+                    subtitle: "Used by the local tvOS profile header",
+                    placeholder: "Nuvio User",
+                    text: $profileName
+                )
+
+                SettingsToggleRow(
+                    title: "PIN Protection",
+                    subtitle: "Require the profile PIN before opening protected profiles",
+                    isOn: $pinEnabled,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Open Last Profile",
+                    subtitle: "Resume with the most recently selected profile",
+                    isOn: $autoSelectLastProfile,
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Account", subtitle: "Sync choices kept locally until account services are connected") {
+                SettingsToggleRow(
+                    title: "Sync Watched State",
+                    subtitle: "Keep watched history, resume points, and library state eligible for sync",
+                    isOn: $syncWatchState,
+                    accentColor: accentColor
+                )
+            }
+        }
+    }
+
+    private var profileInitial: String {
+        let trimmedName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return String((trimmedName.first ?? "N")).uppercased()
+    }
+}
+
+private struct AppearanceSettingsView: View {
+    let accentColor: Color
+
+    @AppStorage(SettingsKey.theme) private var theme = SettingsAccent.white.rawValue
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @AppStorage(SettingsKey.font) private var font = "Inter"
+    @AppStorage(SettingsKey.language) private var language = "System"
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.amoledSurfaces) private var amoledSurfaces = false
+    @AppStorage(SettingsKey.reduceMotion) private var reduceMotion = false
+
+    private let fonts = ["Inter", "System", "Rounded", "Serif"]
+    private let languages = ["System", "English", "Norwegian", "Spanish", "French", "German", "Japanese"]
+
+    private var accentSwatches: [SettingsSwatch] {
+        SettingsAccent.allCases.map { SettingsSwatch(id: $0.rawValue, label: $0.rawValue, color: $0.color) }
+    }
+
+    private var backgroundSwatches: [SettingsSwatch] {
+        SettingsBackground.allCases.map { SettingsSwatch(id: $0.rawValue, label: $0.rawValue, color: $0.swatchColor) }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(title: "Focus Outline", subtitle: "Accent color used for focused cards and controls") {
+                SettingsSwatchRow(swatches: accentSwatches, selection: $theme)
+            }
+
+            SettingsGroup(title: "App Background", subtitle: "Body background color behind every screen") {
+                SettingsSwatchRow(swatches: backgroundSwatches, selection: $bodyColor)
+
+                SettingsToggleRow(
+                    title: "AMOLED Mode",
+                    subtitle: "Force a pure black background, overriding the choice above",
+                    isOn: $amoled,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "AMOLED Surfaces",
+                    subtitle: "Flatten card and row surfaces when AMOLED mode is enabled",
+                    isOn: $amoledSurfaces,
+                    accentColor: accentColor
+                )
+                .opacity(amoled ? 1 : 0.46)
+                .disabled(!amoled)
+            }
+
+            SettingsGroup(title: "Text & Motion", subtitle: "Readable defaults for the TV room") {
+                SettingsOptionRow(
+                    title: "Font",
+                    subtitle: "Preferred app typeface",
+                    selection: $font,
+                    options: fonts,
+                    accentColor: accentColor
+                )
+
+                SettingsOptionRow(
+                    title: "Language",
+                    subtitle: "Interface language preference",
+                    selection: $language,
+                    options: languages,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Reduce Motion",
+                    subtitle: "Use calmer focus transitions and page motion",
+                    isOn: $reduceMotion,
+                    accentColor: accentColor
+                )
+            }
+        }
+    }
+}
+
+private struct LayoutDiscoverySettingsView: View {
+    let accentColor: Color
+
+    @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
+    @AppStorage(SettingsKey.heroEnabled) private var heroEnabled = true
+    @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
+    @AppStorage(SettingsKey.catalogAddonNames) private var catalogAddonNames = true
+    @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
+    @AppStorage(SettingsKey.continueWatchingSort) private var continueWatchingSort = "Default"
+    @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
+    @AppStorage(SettingsKey.showFullDates) private var showFullDates = true
+
+    private let layouts = ["Modern", "Classic", "Compact"]
+    private let discoverLocations = ["Search", "Home", "Library", "Off"]
+    private let continueWatchingSorts = ["Default", "Recently watched", "Release order", "Next up"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(title: "Home Layout", subtitle: "How the home screen presents rows and artwork") {
+                SettingsOptionRow(
+                    title: "Layout",
+                    subtitle: "Primary home browsing style",
+                    selection: $homeLayout,
+                    options: layouts,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Hero Section",
+                    subtitle: "Show featured artwork above catalog rows",
+                    isOn: $heroEnabled,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Poster Labels",
+                    subtitle: "Show titles below poster cards",
+                    isOn: $posterLabels,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Catalog Add-on Names",
+                    subtitle: "Show source add-on names beside catalog titles",
+                    isOn: $catalogAddonNames,
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Discovery", subtitle: "Visibility rules for discovery and continue watching") {
+                SettingsOptionRow(
+                    title: "Discover Entry",
+                    subtitle: "Where the discover surface appears",
+                    selection: $discoverLocation,
+                    options: discoverLocations,
+                    accentColor: accentColor
+                )
+
+                SettingsOptionRow(
+                    title: "Continue Watching",
+                    subtitle: "Default order for resume rows",
+                    selection: $continueWatchingSort,
+                    options: continueWatchingSorts,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Hide Unreleased Content",
+                    subtitle: "Filter titles before their known release date",
+                    isOn: $hideUnreleased,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Show Full Release Dates",
+                    subtitle: "Prefer exact dates when metadata provides them",
+                    isOn: $showFullDates,
+                    accentColor: accentColor
+                )
+            }
+        }
+    }
+}
+
+private struct IntegrationSettingsView: View {
+    let accentColor: Color
+
+    @AppStorage(SettingsKey.traktConnected) private var traktConnected = false
+    @AppStorage(SettingsKey.tmdbEnabled) private var tmdbEnabled = false
+    @AppStorage(SettingsKey.tmdbApiKey) private var tmdbApiKey = ""
+    @AppStorage(SettingsKey.mdbListEnabled) private var mdbListEnabled = false
+    @AppStorage(SettingsKey.mdbListApiKey) private var mdbListApiKey = ""
+    @AppStorage(SettingsKey.debridProvider) private var debridProvider = "None"
+    @AppStorage(SettingsKey.debridApiKey) private var debridApiKey = ""
+
+    private let debridProviders = ["None", "Real-Debrid", "AllDebrid", "Premiumize", "Debrid-Link", "TorBox"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            AddonsSettingsSection(accentColor: accentColor)
+
+            SettingsGroup(title: "Watch Sync", subtitle: "Connection flags for watch history services") {
+                SettingsToggleRow(
+                    title: "Trakt",
+                    subtitle: traktConnected ? "Connected locally for sync-enabled screens" : "Ready for device-code sign-in when auth is wired",
+                    isOn: $traktConnected,
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Metadata Providers", subtitle: "Optional API keys for richer metadata and rating badges") {
+                SettingsToggleRow(
+                    title: "TMDB Metadata",
+                    subtitle: "Enable custom TMDB metadata enrichment",
+                    isOn: $tmdbEnabled,
+                    accentColor: accentColor
+                )
+
+                SettingsTextFieldRow(
+                    title: "TMDB API Key",
+                    subtitle: "Stored locally on this Apple TV",
+                    placeholder: "Not set",
+                    text: $tmdbApiKey,
+                    isSecure: true
+                )
+
+                SettingsToggleRow(
+                    title: "MDBList Ratings",
+                    subtitle: "Show ratings from IMDb, TMDB, Rotten Tomatoes, and Metacritic",
+                    isOn: $mdbListEnabled,
+                    accentColor: accentColor
+                )
+
+                SettingsTextFieldRow(
+                    title: "MDBList API Key",
+                    subtitle: "Stored locally on this Apple TV",
+                    placeholder: "Not set",
+                    text: $mdbListApiKey,
+                    isSecure: true
+                )
+            }
+
+            SettingsGroup(title: "Debrid", subtitle: "Provider and token preference used by stream resolution") {
+                SettingsOptionRow(
+                    title: "Provider",
+                    subtitle: "Preferred debrid provider",
+                    selection: $debridProvider,
+                    options: debridProviders,
+                    accentColor: accentColor
+                )
+
+                SettingsTextFieldRow(
+                    title: "API Key",
+                    subtitle: "Stored locally on this Apple TV",
+                    placeholder: "Not set",
+                    text: $debridApiKey,
+                    isSecure: true
+                )
+                .opacity(debridProvider == "None" ? 0.46 : 1)
+                .disabled(debridProvider == "None")
+            }
+        }
+    }
+}
+
+private struct PlaybackSettingsView: View {
+    let accentColor: Color
+    let onSubtitleLanguages: () -> Void
+
+    @AppStorage(SettingsKey.playerEngine) private var playerEngine = "Auto"
+    @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
+    @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
+    @AppStorage(SettingsKey.smartSubtitleMatching) private var smartSubtitleMatching = true
+    @AppStorage(SettingsKey.autoPlayNext) private var autoPlayNext = true
+    @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
+    @AppStorage(SettingsKey.trailerDelay) private var trailerDelay = 7
+    @AppStorage(SettingsKey.audioLanguage) private var audioLanguage = "System"
+    @AppStorage(SettingsKey.subtitleLanguage) private var subtitleLanguage = "System"
+    @AppStorage(SettingsKey.subtitleLanguageSecondary) private var subtitleLanguageSecondary = "None"
+    @AppStorage(SettingsKey.subtitleLanguageTertiary) private var subtitleLanguageTertiary = "None"
+    @AppStorage(SettingsKey.forcedSubtitles) private var forcedSubtitles = true
+    @AppStorage(SettingsKey.frameRateMatching) private var frameRateMatching = "Off"
+    @AppStorage(SettingsKey.networkCache) private var networkCache = "Auto"
+
+    private let engines = ["Auto", "AVPlayer", "MPVKit"]
+    private let streamQualities = ["Highest", "4K", "1080p", "720p", "Smallest"]
+    private let languages = ["System", "English", "Arabic", "Norwegian", "Spanish", "French", "German", "Japanese"]
+    private let frameRateModes = ["Off", "On start/stop", "Always"]
+    private let cacheModes = ["Auto", "Small", "Medium", "Large"]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(title: "Player", subtitle: "Playback engine and episode flow") {
+                SettingsOptionRow(
+                    title: "Player Engine",
+                    subtitle: "Preferred internal playback path",
+                    selection: $playerEngine,
+                    options: engines,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Auto-Play Next Episode",
+                    subtitle: "Start the next episode automatically when available",
+                    isOn: $autoPlayNext,
+                    accentColor: accentColor
+                )
+
+                SettingsOptionRow(
+                    title: "Frame Rate Matching",
+                    subtitle: "Match display refresh to video where supported",
+                    selection: $frameRateMatching,
+                    options: frameRateModes,
+                    accentColor: accentColor
+                )
+
+                SettingsOptionRow(
+                    title: "Network Cache",
+                    subtitle: "Buffer size preference for streamed video",
+                    selection: $networkCache,
+                    options: cacheModes,
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Smart Playback", subtitle: "Automatically choose streams and matching subtitles") {
+                SettingsToggleRow(
+                    title: "Auto Select Stream",
+                    subtitle: "Skip the stream picker and choose the best matching link",
+                    isOn: $smartStreamSelection,
+                    accentColor: accentColor
+                )
+
+                SettingsOptionRow(
+                    title: "Stream Quality",
+                    subtitle: "Quality target used when selecting a link",
+                    selection: $smartStreamQuality,
+                    options: streamQualities,
+                    accentColor: accentColor
+                )
+                .opacity(smartStreamSelection ? 1 : 0.46)
+                .disabled(!smartStreamSelection)
+
+                SettingsToggleRow(
+                    title: "Match Subtitle Language",
+                    subtitle: "Prefer links and tracks matching Preferred Subtitles",
+                    isOn: $smartSubtitleMatching,
+                    accentColor: accentColor
+                )
+                .opacity(smartStreamSelection ? 1 : 0.46)
+                .disabled(!smartStreamSelection)
+            }
+
+            SettingsGroup(title: "Audio & Subtitles", subtitle: "Language and subtitle rendering defaults") {
+                SettingsOptionRow(
+                    title: "Preferred Audio",
+                    subtitle: "Default audio language",
+                    selection: $audioLanguage,
+                    options: languages,
+                    accentColor: accentColor
+                )
+
+                SettingsActionRow(
+                    title: "Subtitle Languages",
+                    subtitle: "Choose up to 3 languages in priority order",
+                    value: subtitleLanguageSummary,
+                    accentColor: accentColor
+                ) {
+                    onSubtitleLanguages()
+                }
+
+                SettingsToggleRow(
+                    title: "Forced Subtitles",
+                    subtitle: "Use forced subtitles when a matching track exists",
+                    isOn: $forcedSubtitles,
+                    accentColor: accentColor
+                )
+
+                SettingsInfoRow(
+                    title: "Subtitle Appearance",
+                    value: "Subtitle Style tab"
+                )
+            }
+
+            SettingsGroup(title: "Trailers", subtitle: "Preview playback on details and focused posters") {
+                SettingsToggleRow(
+                    title: "Autoplay Trailers",
+                    subtitle: "Start previews after focus settles",
+                    isOn: $trailersEnabled,
+                    accentColor: accentColor
+                )
+
+                SettingsStepperRow(
+                    title: "Trailer Delay",
+                    subtitle: "Seconds before autoplay starts",
+                    value: $trailerDelay,
+                    range: 2...15,
+                    step: 1,
+                    suffix: "s",
+                    accentColor: accentColor
+                )
+                .opacity(trailersEnabled ? 1 : 0.46)
+                .disabled(!trailersEnabled)
+            }
+        }
+    }
+
+    private var subtitleLanguageSummary: String {
+        let ordered = SubtitleLanguagePreferences.ordered(
+            primary: subtitleLanguage,
+            secondary: subtitleLanguageSecondary,
+            tertiary: subtitleLanguageTertiary
+        )
+        return ordered.isEmpty ? "System" : ordered.joined(separator: ", ")
+    }
+}
+
+// MARK: - Subtitle Style tab
+
+/// Thin wrapper used by the Settings sidebar tab.
+private struct SubtitleStyleSettingsView: View {
+    let accentColor: Color
+    var body: some View { SubtitleStyleEditor(accentColor: accentColor) }
+}
+
+/// The full subtitle-appearance editor: a live preview plus every control.
+/// Reused by the Settings tab and by the in-player styling panel. `onChange`
+/// fires after any value changes so the player can re-apply the style to mpv
+/// live while you watch.
+struct SubtitleStyleEditor: View {
+    let accentColor: Color
+    var onChange: (() -> Void)? = nil
+
+    @AppStorage(SubtitleStyleKey.textSize) private var textSize = SubtitleStyleDefaults.textSize
+    @AppStorage(SubtitleStyleKey.bold) private var bold = SubtitleStyleDefaults.bold
+    @AppStorage(SubtitleStyleKey.bottomOffset) private var bottomOffset = SubtitleStyleDefaults.bottomOffset
+    @AppStorage(SubtitleStyleKey.horizontalMargin) private var horizontalMargin = SubtitleStyleDefaults.horizontalMargin
+    @AppStorage(SubtitleStyleKey.letterSpacing) private var letterSpacing = SubtitleStyleDefaults.letterSpacing
+    @AppStorage(SubtitleStyleKey.textColor) private var textColor = SubtitleStyleDefaults.textColor
+    @AppStorage(SubtitleStyleKey.textOpacity) private var textOpacity = SubtitleStyleDefaults.textOpacity
+    @AppStorage(SubtitleStyleKey.outlineEnabled) private var outlineEnabled = SubtitleStyleDefaults.outlineEnabled
+    @AppStorage(SubtitleStyleKey.outlineColor) private var outlineColor = SubtitleStyleDefaults.outlineColor
+
+    private var style: SubtitleStyle {
+        SubtitleStyle(
+            textSize: textSize,
+            bold: bold,
+            bottomOffset: bottomOffset,
+            horizontalMargin: horizontalMargin,
+            letterSpacing: letterSpacing,
+            textColorHex: textColor,
+            textOpacity: textOpacity,
+            outlineEnabled: outlineEnabled,
+            outlineColorHex: outlineColor
+        )
+    }
+
+    /// Concatenation of every value; `.onChange` on it fires `onChange` once per edit.
+    private var changeToken: String {
+        "\(textSize)|\(bold)|\(bottomOffset)|\(horizontalMargin)|\(letterSpacing)|\(textColor)|\(textOpacity)|\(outlineEnabled)|\(outlineColor)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SubtitlePreviewCard(style: style)
+
+            ScrollView {
+                controls
+                    .padding(.bottom, 32)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .focusSection()
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .onChange(of: changeToken) { _ in onChange?() }
+    }
+
+    private var controls: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(title: "Text", subtitle: "Size, weight, spacing, color, and opacity of the caption text") {
+                SettingsStepperRow(
+                    title: "Text Size",
+                    subtitle: "Relative subtitle text size",
+                    value: $textSize,
+                    range: 60...220,
+                    step: 5,
+                    suffix: "%",
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Bold",
+                    subtitle: "Use a heavier caption weight",
+                    isOn: $bold,
+                    accentColor: accentColor
+                )
+
+                SettingsStepperRow(
+                    title: "Letter Spacing",
+                    subtitle: "Squeeze the text together or open it up",
+                    value: $letterSpacing,
+                    range: -8...40,
+                    step: 2,
+                    suffix: "",
+                    accentColor: accentColor
+                )
+
+                SubtitleColorRow(
+                    title: "Text Color",
+                    subtitle: "Caption fill color",
+                    selection: $textColor,
+                    accentColor: accentColor
+                )
+
+                SettingsStepperRow(
+                    title: "Text Opacity",
+                    subtitle: "Caption transparency",
+                    value: $textOpacity,
+                    range: 20...100,
+                    step: 5,
+                    suffix: "%",
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Position", subtitle: "Where captions sit on screen") {
+                SettingsStepperRow(
+                    title: "Vertical Position",
+                    subtitle: "Raise captions up off the bottom edge",
+                    value: $bottomOffset,
+                    range: 0...160,
+                    step: 4,
+                    suffix: "",
+                    accentColor: accentColor
+                )
+
+                SettingsStepperRow(
+                    title: "Horizontal Margin",
+                    subtitle: "Inset captions in from the left and right edges",
+                    value: $horizontalMargin,
+                    range: 0...200,
+                    step: 5,
+                    suffix: "",
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Outline", subtitle: "Border drawn around the text for readability") {
+                SettingsToggleRow(
+                    title: "Outline",
+                    subtitle: "Draw a border around the text for readability",
+                    isOn: $outlineEnabled,
+                    accentColor: accentColor
+                )
+
+                SubtitleColorRow(
+                    title: "Outline Color",
+                    subtitle: "Border color drawn around the text",
+                    selection: $outlineColor,
+                    accentColor: accentColor
+                )
+                .opacity(outlineEnabled ? 1 : 0.46)
+                .disabled(!outlineEnabled)
+            }
+
+            SettingsGroup(title: "Reset", subtitle: "Restore the default subtitle appearance") {
+                SettingsActionRow(
+                    title: "Reset Defaults",
+                    subtitle: "Clears every value on this screen",
+                    value: "Reset",
+                    accentColor: accentColor,
+                    action: resetDefaults
+                )
+            }
+        }
+    }
+
+    private func resetDefaults() {
+        textSize = SubtitleStyleDefaults.textSize
+        bold = SubtitleStyleDefaults.bold
+        bottomOffset = SubtitleStyleDefaults.bottomOffset
+        horizontalMargin = SubtitleStyleDefaults.horizontalMargin
+        letterSpacing = SubtitleStyleDefaults.letterSpacing
+        textColor = SubtitleStyleDefaults.textColor
+        textOpacity = SubtitleStyleDefaults.textOpacity
+        outlineEnabled = SubtitleStyleDefaults.outlineEnabled
+        outlineColor = SubtitleStyleDefaults.outlineColor
+    }
+}
+
+/// Faux video frame that renders sample captions with the live style so the
+/// user sees the result before pressing play.
+private struct SubtitlePreviewCard: View {
+    let style: SubtitleStyle
+
+    private let sampleText = "The quick brown fox jumps over the lazy dog"
+
+    private var fontSize: CGFloat {
+        min(max(CGFloat(style.textSize) / 100.0 * 40.0, 16), 92)
+    }
+
+    private var previewBottomPadding: CGFloat {
+        22 + CGFloat(style.bottomOffset) * 0.7
+    }
+
+    private var previewHorizontalPadding: CGFloat {
+        16 + CGFloat(min(max(style.horizontalMargin, 0), 200)) / 200.0 * 130.0
+    }
+
+    private var previewTracking: CGFloat {
+        CGFloat(style.letterSpacing) * 0.6
+    }
+
+    private var outlineWidth: CGFloat {
+        max(2, fontSize * 0.05)
+    }
+
+    private var outlineOffsets: [CGPoint] {
+        let w = outlineWidth
+        return [
+            CGPoint(x: -w, y: 0), CGPoint(x: w, y: 0),
+            CGPoint(x: 0, y: -w), CGPoint(x: 0, y: w),
+            CGPoint(x: -w, y: -w), CGPoint(x: w, y: -w),
+            CGPoint(x: -w, y: w), CGPoint(x: w, y: w)
+        ]
+    }
+
+    var body: some View {
+        ZStack(alignment: .bottom) {
+            LinearGradient(
+                colors: [
+                    Color(red: 0.12, green: 0.14, blue: 0.24),
+                    Color(red: 0.05, green: 0.06, blue: 0.11),
+                    .black
+                ],
+                startPoint: .top,
+                endPoint: .bottom
+            )
+
+            Circle()
+                .fill(Color.white.opacity(0.06))
+                .frame(width: 320, height: 320)
+                .blur(radius: 60)
+                .offset(x: -180, y: -70)
+
+            VStack {
+                Spacer()
+                styledSubtitle
+                    .padding(.horizontal, previewHorizontalPadding)
+                    .padding(.bottom, previewBottomPadding)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(height: 320)
+        .frame(maxWidth: .infinity)
+        .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        )
+        .overlay(alignment: .topLeading) {
+            Text("PREVIEW")
+                .font(.system(size: 14, weight: .black))
+                .tracking(2)
+                .foregroundColor(.white.opacity(0.5))
+                .padding(18)
+        }
+    }
+
+    private var styledSubtitle: some View {
+        let font = Font.system(size: fontSize, weight: style.bold ? .heavy : .semibold)
+        let fill = Color(hex: style.textColorHex).opacity(Double(style.textOpacity) / 100.0)
+        let outline = Color(hex: style.outlineColorHex)
+        return ZStack {
+            if style.outlineEnabled {
+                ForEach(Array(outlineOffsets.enumerated()), id: \.offset) { _, point in
+                    Text(sampleText)
+                        .font(font)
+                        .foregroundColor(outline)
+                        .offset(x: point.x, y: point.y)
+                }
+            }
+            Text(sampleText)
+                .font(font)
+                .foregroundColor(fill)
+        }
+        .tracking(previewTracking)
+        .multilineTextAlignment(.center)
+        .lineLimit(2)
+        .shadow(color: .black.opacity(0.5), radius: 3, x: 0, y: 1)
+        .animation(.easeOut(duration: 0.12), value: fontSize)
+    }
+}
+
+private struct SubtitleColorRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var selection: String
+    let accentColor: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            SettingsRowText(title: title, subtitle: subtitle)
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+            HStack(spacing: 14) {
+                ForEach(SubtitlePalette.colors, id: \.self) { hex in
+                    SubtitleColorSwatchButton(
+                        hex: hex,
+                        isSelected: selection.caseInsensitiveCompare(hex) == .orderedSame,
+                        accentColor: accentColor
+                    ) {
+                        selection = hex
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .modifier(SettingsSearchGlassBackground(filled: false, shape: RoundedRectangle(cornerRadius: 28, style: .continuous)))
+        .overlay(
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+}
+
+private struct SubtitleColorSwatchButton: View {
+    let hex: String
+    let isSelected: Bool
+    let accentColor: Color
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Circle()
+                .fill(Color(hex: hex))
+                .frame(width: 48, height: 48)
+                .overlay(
+                    Circle()
+                        .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
+                )
+                .overlay(
+                    Circle()
+                        .strokeBorder(ringColor, lineWidth: isFocused ? 5 : (isSelected ? 4 : 0))
+                        .padding(-4)
+                )
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .scaleEffect(isFocused ? 1.18 : 1.0)
+        .zIndex(isFocused ? 1 : 0)
+        .animation(.easeOut(duration: 0.14), value: isFocused)
+    }
+
+    private var ringColor: Color {
+        if isFocused { return .white }
+        return isSelected ? accentColor : .clear
+    }
+}
+
+private struct SubtitleLanguagePickerWindow: View {
+    @Binding var primary: String
+    @Binding var secondary: String
+    @Binding var tertiary: String
+    let languages: [String]
+    let accentColor: Color
+    let onDone: () -> Void
+
+    @FocusState private var focusedControl: Control?
+
+    private enum Control: Hashable {
+        case language(String)
+        case done
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.62)
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 22) {
+                HStack(spacing: 18) {
+                    Image(systemName: "captions.bubble.fill")
+                        .font(.system(size: 38, weight: .semibold))
+                        .foregroundColor(accentColor)
+                        .frame(width: 58, height: 58)
+                        .settingsGlass(shape: Circle(), isProminent: true)
+
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("Subtitle Languages")
+                            .font(.system(size: 34, weight: .bold))
+                            .foregroundColor(.white)
+                        Text("Pick the order smart playback should try first.")
+                            .font(.system(size: 19, weight: .medium))
+                            .foregroundColor(.white.opacity(0.58))
+                    }
+                }
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(languages, id: \.self) { language in
+                            SubtitleLanguageListRow(
+                                language: language,
+                                priority: priority(for: language),
+                                isFocused: focusedControl == .language(language),
+                                accentColor: accentColor
+                            ) {
+                                toggle(language)
+                            }
+                            .focused($focusedControl, equals: .language(language))
+                        }
+                    }
+                    .padding(.vertical, 2)
+                }
+                .frame(maxHeight: 420)
+                .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                .focusSection()
+
+                HStack {
+                    Spacer()
+                    Button(action: onDone) {
+                        HStack(spacing: 10) {
+                            Image(systemName: "checkmark")
+                                .font(.system(size: 18, weight: .bold))
+                            Text("Done")
+                                .font(.system(size: 21, weight: .bold))
+                        }
+                        .foregroundColor(focusedControl == .done && accentColor == .white ? .black : .white)
+                        .padding(.horizontal, 26)
+                        .frame(height: 58)
+                        .settingsGlass(shape: Capsule(), isProminent: focusedControl == .done)
+                    }
+                    .buttonStyle(PosterCardButtonStyle())
+                    .focused($focusedControl, equals: .done)
+                    .focusEffectDisabledIfAvailable()
+                }
+            }
+            .padding(34)
+            .frame(width: 900)
+            .settingsGlass(shape: RoundedRectangle(cornerRadius: 34, style: .continuous), isProminent: true)
+            .overlay(
+                RoundedRectangle(cornerRadius: 34, style: .continuous)
+                    .strokeBorder(Color.white.opacity(0.20), lineWidth: 1)
+            )
+            .onAppear {
+                focusedControl = .language(selectedLanguages.first ?? languages.first ?? "English")
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .focusSection()
+        .onMoveCommand(perform: handleMove)
+        .onExitCommand(perform: onDone)
+    }
+
+    private var selectedLanguages: [String] {
+        SubtitleLanguagePreferences.ordered(
+            primary: primary,
+            secondary: secondary,
+            tertiary: tertiary
+        )
+    }
+
+    private func priority(for language: String) -> Int? {
+        selectedLanguages.firstIndex(of: language).map { $0 + 1 }
+    }
+
+    private func toggle(_ language: String) {
+        var selected = selectedLanguages
+        if let index = selected.firstIndex(of: language) {
+            selected.remove(at: index)
+        } else if selected.count < 3 {
+            selected.append(language)
+        } else {
+            selected[2] = language
+        }
+
+        primary = selected.indices.contains(0) ? selected[0] : "System"
+        secondary = selected.indices.contains(1) ? selected[1] : "None"
+        tertiary = selected.indices.contains(2) ? selected[2] : "None"
+    }
+
+    private var focusOrder: [Control] {
+        languages.map { .language($0) } + [.done]
+    }
+
+    private func handleMove(_ direction: MoveCommandDirection) {
+        guard let focusedControl,
+              let currentIndex = focusOrder.firstIndex(of: focusedControl) else {
+            self.focusedControl = .language(selectedLanguages.first ?? languages.first ?? "English")
+            return
+        }
+
+        switch direction {
+        case .up:
+            self.focusedControl = focusOrder[max(currentIndex - 1, 0)]
+        case .down:
+            self.focusedControl = focusOrder[min(currentIndex + 1, focusOrder.count - 1)]
+        default:
+            break
+        }
+    }
+}
+
+private struct SubtitleLanguageListRow: View {
+    let language: String
+    let priority: Int?
+    let isFocused: Bool
+    let accentColor: Color
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 16) {
+                Text(language)
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+
+                Spacer(minLength: 24)
+
+                if let priority {
+                    Text("\(priority)")
+                        .font(.system(size: 18, weight: .black))
+                        .foregroundColor(accentColor == .white ? .black : .white)
+                        .frame(width: 34, height: 34)
+                        .background(accentColor, in: Circle())
+
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 20, weight: .black))
+                        .foregroundColor(accentColor)
+                }
+            }
+            .padding(.horizontal, 24)
+            .frame(height: 72)
+            .settingsGlass(shape: Capsule(), isProminent: isFocused)
+            .overlay(
+                Capsule()
+                    .strokeBorder(isFocused ? Color.white.opacity(0.86) : Color.white.opacity(priority == nil ? 0.12 : 0.28), lineWidth: isFocused ? 3 : 1)
+            )
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focusEffectDisabledIfAvailable()
+    }
+}
+
+private struct AdvancedSettingsView: View {
+    let accentColor: Color
+
+    @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
+    @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
+    @AppStorage(SettingsKey.playbackDiagnostics) private var playbackDiagnostics = false
+    @AppStorage(SettingsKey.focusHighlighter) private var focusHighlighter = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(title: "Navigation", subtitle: "Remote focus behavior for dense rows") {
+                SettingsToggleRow(
+                    title: "Fast Horizontal Navigation",
+                    subtitle: "Move through long poster rows more aggressively",
+                    isOn: $fastNavigation,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Smooth Bring Into View",
+                    subtitle: "Animate focused content into a readable position",
+                    isOn: $smoothFocus,
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Diagnostics", subtitle: "Local tools for debugging playback and focus") {
+                SettingsToggleRow(
+                    title: "Playback Issue Reports",
+                    subtitle: "Keep diagnostic snapshots after failed playback attempts",
+                    isOn: $playbackDiagnostics,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
+                    title: "Focus Highlighter",
+                    subtitle: "Draw extra focus outlines for layout debugging",
+                    isOn: $focusHighlighter,
+                    accentColor: accentColor
+                )
+            }
+
+            SettingsGroup(title: "Reset", subtitle: "Clear local tvOS settings saved by this screen") {
+                SettingsActionRow(
+                    title: "Reset Settings",
+                    subtitle: "Restore the core settings defaults",
+                    value: "Reset",
+                    accentColor: accentColor,
+                    action: resetSettings
+                )
+            }
+        }
+    }
+
+    private func resetSettings() {
+        // Reset only the active profile's settings, not other profiles'.
+        let defaults = ProfileSettings.current
+        SettingsKey.all.forEach { defaults.removeObject(forKey: $0) }
+    }
+}
+
+private struct AboutSettingsView: View {
+    let accentColor: Color
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            SettingsGroup(title: "NuvioTV", subtitle: "Build and runtime information") {
+                SettingsInfoRow(title: "App Version", value: appVersion)
+                SettingsInfoRow(title: "Engine Core", value: "NuvioCore-FFI v0.4.8")
+                SettingsInfoRow(title: "Playback Stack", value: "AVKit / MPVKit")
+                SettingsInfoRow(title: "Catalog Protocol", value: "Stremio compatible")
+            }
+
+            SettingsGroup(title: "Open Source", subtitle: "Project components used by this tvOS app") {
+                Text("This software uses SwiftUI, AVKit, MPVKit wrappers, the Nuvio Rust SDK surface, and Stremio-compatible catalog APIs.")
+                    .font(.system(size: 21, weight: .medium))
+                    .foregroundColor(.white.opacity(0.72))
+                    .fixedSize(horizontal: false, vertical: true)
+
+                SettingsActionRow(
+                    title: "Licenses & Attributions",
+                    subtitle: "Bundled attribution view is not connected in this prototype",
+                    value: "Local",
+                    accentColor: accentColor,
+                    action: {}
+                )
+            }
+        }
+    }
+
+    private var appVersion: String {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "1"
+        return "\(version) (\(build))"
+    }
+}
+
+// MARK: - Addons (moved here from the former Addons tab)
+
+private struct AddonsSettingsSection: View {
+    let accentColor: Color
+
+    @AppStorage(SettingsKey.streamAddonManifestURL) private var streamAddonManifestURL = ""
+    @State private var addons: [AddonItem] = AddonItem.defaults
+
+    var body: some View {
+        SettingsGroup(title: "Add-ons", subtitle: "Stremio-compatible catalog and stream sources") {
+            SettingsTextFieldRow(
+                title: "Stream Add-on URL",
+                subtitle: "Paste your configured Stremio manifest link",
+                placeholder: "https://.../manifest.json",
+                text: $streamAddonManifestURL,
+                fieldWidth: 560
+            )
+
+            ForEach($addons) { $addon in
+                AddonSettingsRow(addon: addon, accentColor: accentColor) {
+                    toggle(addon)
+                }
+            }
+        }
+    }
+
+    private func toggle(_ addon: AddonItem) {
+        guard !addon.isLocked else { return }
+        if let idx = addons.firstIndex(where: { $0.id == addon.id }) {
+            addons[idx].isInstalled.toggle()
+        }
+    }
+}
+
+private struct AddonSettingsRow: View {
+    let addon: AddonItem
+    let accentColor: Color
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                Image(systemName: addon.logoSystemName)
+                    .font(.system(size: 26))
+                    .foregroundColor(addon.isOfficial ? accentColor : .white.opacity(0.8))
+                    .frame(width: 48, height: 48)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(addon.name)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        Text("v\(addon.version)")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.white.opacity(0.4))
+                        if addon.isOfficial {
+                            Text("Official")
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundColor(accentColor)
+                        }
+                    }
+                    Text(addon.description)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.white.opacity(0.56))
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 20)
+
+                Text(statusLabel)
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(statusColor)
+                    .lineLimit(1)
+            }
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .disabled(addon.isLocked)
+    }
+
+    private var statusLabel: String {
+        if addon.isLocked { return "Locked" }
+        return addon.isInstalled ? "Uninstall" : "Install"
+    }
+
+    private var statusColor: Color {
+        if addon.isLocked { return .white.opacity(0.32) }
+        return addon.isInstalled ? .white.opacity(0.7) : accentColor
+    }
+}
+
+private struct SettingsDetailHeader: View {
+    let title: String
+    let subtitle: String
+    let iconName: String
+    let accentColor: Color
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 20) {
+            Image(systemName: iconName)
+                .font(.system(size: 36, weight: .semibold))
+                .foregroundColor(accentColor)
+                .frame(width: 70, height: 70)
+                .settingsGlass(shape: Circle(), isProminent: true)
+                .overlay(
+                    Circle()
+                        .strokeBorder(accentColor.opacity(0.55), lineWidth: 1)
+                )
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title)
+                    .font(.system(size: 40, weight: .bold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+
+                Text(subtitle)
+                    .font(.system(size: 20, weight: .medium))
+                    .foregroundColor(.white.opacity(0.62))
+                    .lineLimit(2)
+            }
+
+            Spacer()
+        }
+    }
+}
+
+private struct SettingsGroup<Content: View>: View {
+    let title: String
+    let subtitle: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title)
+                    .font(.system(size: 28, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text(subtitle)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(.white.opacity(0.56))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            VStack(spacing: 12) {
+                content
+            }
+        }
+        .padding(24)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .settingsGlass(shape: RoundedRectangle(cornerRadius: 32, style: .continuous), isProminent: false)
+        .overlay(
+            RoundedRectangle(cornerRadius: 32, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+        )
+    }
+}
+
+private struct SettingsToggleRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var isOn: Bool
+    let accentColor: Color
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button {
+            isOn.toggle()
+        } label: {
+            SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                SettingsRowText(title: title, subtitle: subtitle)
+
+                Spacer(minLength: 24)
+
+                HStack(spacing: 10) {
+                    Text(isOn ? "On" : "Off")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundColor(.white.opacity(0.78))
+                        .frame(width: 34, alignment: .trailing)
+
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .fill(isOn ? accentColor : Color.white.opacity(0.24))
+                        .frame(width: 54, height: 30)
+                        .overlay(alignment: isOn ? .trailing : .leading) {
+                            Circle()
+                                .fill(isOn && accentColor == .white ? Color.black : Color.white)
+                                .frame(width: 22, height: 22)
+                                .padding(4)
+                        }
+                }
+            }
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+    }
+}
+
+private struct SettingsOptionRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var selection: String
+    let options: [String]
+    let accentColor: Color
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: selectNext) {
+            SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                SettingsRowText(title: title, subtitle: subtitle)
+
+                Spacer(minLength: 24)
+
+                HStack(spacing: 10) {
+                    Text(currentValue)
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.76)
+
+                    Image(systemName: "chevron.up.chevron.down")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundColor(accentColor)
+                }
+                .frame(maxWidth: 260, alignment: .trailing)
+            }
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+    }
+
+    private var currentValue: String {
+        options.contains(selection) ? selection : (options.first ?? selection)
+    }
+
+    private func selectNext() {
+        guard !options.isEmpty else { return }
+        let currentIndex = options.firstIndex(of: currentValue) ?? 0
+        selection = options[(currentIndex + 1) % options.count]
+    }
+}
+
+private struct SettingsStepperRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var value: Int
+    let range: ClosedRange<Int>
+    let step: Int
+    let suffix: String
+    let accentColor: Color
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+            SettingsRowText(title: title, subtitle: subtitle)
+
+            Spacer(minLength: 24)
+
+            HStack(spacing: 12) {
+                SettingsMiniButton(systemName: "minus", accentColor: accentColor) {
+                    value = max(range.lowerBound, value - step)
+                }
+                .disabled(value <= range.lowerBound)
+
+                Text("\(value)\(suffix)")
+                    .font(.system(size: 20, weight: .bold))
+                    .foregroundColor(.white)
+                    .frame(width: 78)
+
+                SettingsMiniButton(systemName: "plus", accentColor: accentColor) {
+                    value = min(range.upperBound, value + step)
+                }
+                .disabled(value >= range.upperBound)
+            }
+        }
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+    }
+}
+
+private struct SettingsTextFieldRow: View {
+    let title: String
+    let subtitle: String
+    let placeholder: String
+    @Binding var text: String
+    var isSecure: Bool = false
+    var fieldWidth: CGFloat = 300
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        SettingsRowShell(isFocused: isFocused, accentColor: .white) {
+            SettingsRowText(title: title, subtitle: subtitle)
+
+            Spacer(minLength: 24)
+
+            if isSecure {
+                SecureField(placeholder, text: $text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .frame(width: fieldWidth, height: 48)
+                    .settingsGlass(shape: Capsule(), isProminent: isFocused)
+            } else {
+                TextField(placeholder, text: $text)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 20, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 16)
+                    .frame(width: fieldWidth, height: 48)
+                    .settingsGlass(shape: Capsule(), isProminent: isFocused)
+            }
+        }
+        .focused($isFocused)
+    }
+}
+
+private struct SettingsActionRow: View {
+    let title: String
+    let subtitle: String
+    let value: String
+    let accentColor: Color
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                SettingsRowText(title: title, subtitle: subtitle)
+
+                Spacer(minLength: 24)
+
+                Text(value)
+                    .font(.system(size: 19, weight: .bold))
+                    .foregroundColor(accentColor)
+                    .lineLimit(1)
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 17, weight: .bold))
+                    .foregroundColor(accentColor)
+            }
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+    }
+}
+
+private struct SettingsInfoRow: View {
+    let title: String
+    let value: String
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 20) {
+            Text(title)
+                .font(.system(size: 21, weight: .semibold))
+                .foregroundColor(.white)
+
+            Spacer(minLength: 24)
+
+            Text(value)
+                .font(.system(size: 21, weight: .bold))
+                .foregroundColor(.white.opacity(0.62))
+                .multilineTextAlignment(.trailing)
+                .lineLimit(2)
+        }
+        .padding(.horizontal, 20)
+        .frame(minHeight: 64)
+        .settingsGlass(shape: RoundedRectangle(cornerRadius: 24, style: .continuous), isProminent: false)
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
+        )
+    }
+}
+
+struct SettingsSwatch: Identifiable {
+    let id: String
+    let label: String
+    let color: Color
+}
+
+private struct SettingsSwatchRow: View {
+    let swatches: [SettingsSwatch]
+    @Binding var selection: String
+
+    var body: some View {
+        HStack(spacing: 14) {
+            ForEach(swatches) { swatch in
+                SettingsSwatchButton(
+                    swatch: swatch,
+                    isSelected: selection == swatch.id
+                ) {
+                    selection = swatch.id
+                }
+            }
+
+            Spacer()
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+private struct SettingsSwatchButton: View {
+    let swatch: SettingsSwatch
+    let isSelected: Bool
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                Circle()
+                    .fill(swatch.color)
+                    .frame(width: 42, height: 42)
+                    .overlay(
+                        Circle()
+                            .strokeBorder(
+                                isSelected ? Color.white : Color.white.opacity(0.18),
+                                lineWidth: isSelected ? 4 : 1
+                            )
+                    )
+
+                Text(swatch.label)
+                    .font(.system(size: 14, weight: .bold))
+                    .foregroundColor(.white.opacity(isFocused || isSelected ? 1 : 0.65))
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .fill(swatchFill)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    .strokeBorder(isFocused ? Color.white : Color.clear, lineWidth: 4)
+            )
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .scaleEffect(isFocused ? 1.12 : 1.0)
+        .zIndex(isFocused ? 1 : 0)
+        .animation(.easeOut(duration: 0.14), value: isFocused)
+    }
+
+    private var swatchFill: Color {
+        if isFocused { return Color.white.opacity(0.16) }
+        return isSelected ? swatch.color.opacity(0.18) : Color.white.opacity(0.045)
+    }
+}
+
+private struct SettingsRowShell<Content: View>: View {
+    let isFocused: Bool
+    let accentColor: Color
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(spacing: 16) {
+            content
+        }
+        .padding(.horizontal, 20)
+        .frame(minHeight: 74)
+        .modifier(SettingsSearchGlassBackground(filled: false, shape: Capsule()))
+        .overlay(
+            Capsule()
+                .strokeBorder(isFocused ? Color.white.opacity(0.86) : Color.white.opacity(0.15), lineWidth: isFocused ? 3 : 1)
+        )
+        .animation(.easeOut(duration: 0.18), value: isFocused)
+    }
+}
+
+private struct SettingsRowText: View {
+    let title: String
+    let subtitle: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+
+            Text(subtitle)
+                .font(.system(size: 17, weight: .medium))
+                .foregroundColor(.white.opacity(0.56))
+                .lineLimit(2)
+                .minimumScaleFactor(0.82)
+        }
+    }
+}
+
+private struct SettingsMiniButton: View {
+    let systemName: String
+    let accentColor: Color
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+    @Environment(\.isEnabled) private var isEnabled
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemName)
+                .font(.system(size: 18, weight: .bold))
+                .foregroundColor(isEnabled ? .white : .white.opacity(0.32))
+                .frame(width: 44, height: 44)
+                .settingsGlass(shape: Circle(), isProminent: isFocused)
+                .overlay(
+                    Circle()
+                        .strokeBorder(isFocused ? accentColor.opacity(0.78) : Color.white.opacity(0.12), lineWidth: 1)
+                )
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func settingsGlass<S: InsettableShape>(shape: S, isProminent: Bool) -> some View {
+        if #available(tvOS 26.0, *) {
+            self
+                .background(isProminent ? Color.white.opacity(0.13) : Color.white.opacity(0.045), in: shape)
+                .glassEffect(.regular, in: shape)
+        } else {
+            self.background(
+                (isProminent ? Color.white.opacity(0.18) : Color.white.opacity(0.07)),
+                in: shape
+            )
+        }
+    }
+}
+
+private struct SettingsSearchGlassBackground<S: InsettableShape>: ViewModifier {
+    let filled: Bool
+    let shape: S
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if filled {
+            content.background(Color.white, in: shape)
+        } else if #available(tvOS 26.0, *) {
+            content.glassEffect(.regular, in: shape)
+        } else {
+            content.background(.ultraThinMaterial, in: shape)
+        }
+    }
+}
+
+#if DEBUG
+struct SettingsView_Previews: PreviewProvider {
+    static var previews: some View {
+        SettingsView()
+    }
+}
+#endif

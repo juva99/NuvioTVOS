@@ -1,0 +1,1290 @@
+//
+//  NuvioTVApp.swift
+//  NuvioTV
+//
+//  Created by Claude Code
+//  Main SwiftUI app entry point with Master view coordinator
+//
+
+import SwiftUI
+import Foundation
+import UIKit
+
+@main
+struct NuvioTVApp: App {
+    var body: some Scene {
+        WindowGroup {
+            ContentView()
+        }
+    }
+}
+
+enum TVScreen {
+    case login
+    case profileSelection
+    case main
+    case details(id: String, type: String)
+    case player(url: URL, meta: NuvioMeta, subtitle: String, externalSubtitles: [NuvioSubtitle], resumeFrom: Double?)
+}
+
+enum TVTab: String, CaseIterable, Identifiable {
+    case profile = "Profile"
+    case home = "Home"
+    case search = "Search"
+    case library = "Library"
+    case settings = "Settings"
+
+    var id: String { rawValue }
+
+    var symbol: String {
+        switch self {
+        case .profile: return "person.crop.circle"
+        case .home: return "house"
+        case .search: return "magnifyingglass"
+        case .library: return "rectangle.stack"
+        case .settings: return "gearshape"
+        }
+    }
+}
+
+/// Main content view - entry point for the app with screen routing
+struct ContentView: View {
+    @State private var activeScreen: TVScreen = .login
+    @State private var resolvedInitialScreen = false
+    @State private var selectedTab: TVTab = .home
+    @StateObject private var authManager = AuthManager()
+    @StateObject private var profileViewModel = ProfileViewModel()
+    @StateObject private var searchViewModel = SearchViewModel()
+    @StateObject private var libraryViewModel = LibraryViewModel()
+
+    var body: some View {
+        ZStack {
+            ProfileScopedRootBackground()
+
+            switch activeScreen {
+            case .login:
+                LoginView(auth: authManager) {
+                    withAnimation(.easeInOut(duration: 0.28)) {
+                        activeScreen = .profileSelection
+                    }
+                }
+                .transition(.opacity)
+
+            case .profileSelection:
+                UserProfileView(viewModel: profileViewModel)
+                    .onReceive(profileViewModel.$activeProfile) { activeProfile in
+                        if activeProfile != nil {
+                            withAnimation(.easeInOut(duration: 0.28)) {
+                                activeScreen = .main
+                            }
+                        }
+                    }
+                    
+            case .main:
+                TVMainTabView(
+                    selectedTab: $selectedTab,
+                    activeProfile: profileViewModel.activeProfile,
+                    searchViewModel: searchViewModel,
+                    libraryViewModel: libraryViewModel,
+                    onSwitchProfile: {
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            selectedTab = .home
+                            profileViewModel.activeProfile = nil
+                            activeScreen = .profileSelection
+                        }
+                    },
+                    onNavigateToDetails: { contentId, contentType in
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            activeScreen = .details(id: contentId, type: contentType)
+                        }
+                    },
+                    onResumePlayback: { item in
+                        if let url = URL(string: item.streamUrl) {
+                            withAnimation(.easeInOut(duration: 0.28)) {
+                                activeScreen = .player(
+                                    url: url,
+                                    meta: item.meta,
+                                    subtitle: "",
+                                    externalSubtitles: [],
+                                    resumeFrom: item.resumePosition
+                                )
+                            }
+                        }
+                    }
+                )
+                .transition(.opacity)
+                
+            case .details(let contentId, let contentType):
+                DetailsScreen(
+                    id: contentId,
+                    type: contentType,
+                    repository: CinemetaCatalogRepository(),
+                    onPlayClick: { streamUrlString, meta, subtitle, externalSubtitles in
+                        if let url = URL(string: streamUrlString) {
+                            withAnimation(.easeInOut(duration: 0.28)) {
+                                activeScreen = .player(
+                                    url: url,
+                                    meta: meta,
+                                    subtitle: subtitle,
+                                    externalSubtitles: externalSubtitles,
+                                    resumeFrom: ContinueWatchingStore.item(for: meta.id)?.resumePosition
+                                )
+                            }
+                        }
+                    },
+                    onBack: {
+                        withAnimation(.easeInOut(duration: 0.24)) {
+                            activeScreen = .main
+                        }
+                    }
+                )
+                .transition(.asymmetric(insertion: .move(edge: .trailing), removal: .move(edge: .leading)))
+                
+            case .player(let url, let meta, let subtitle, let externalSubtitles, let resumeFrom):
+                PlayerView(url: url, meta: meta, subtitle: subtitle, externalSubtitles: externalSubtitles, resumeFrom: resumeFrom) {
+                    withAnimation(.easeInOut(duration: 0.24)) {
+                        activeScreen = meta.isSeries ? .details(id: meta.id, type: meta.type) : .main
+                    }
+                }
+                .transition(.opacity)
+            }
+        }
+        // Resolve every @AppStorage in the app against the active profile's
+        // settings suite, so each profile keeps its own theme, layout, playback
+        // preferences, etc. Falls back to the shared store before a profile is picked.
+        .defaultAppStorage(ProfileSettings.store(for: profileViewModel.activeProfile?.id))
+        .background(Color.black.ignoresSafeArea())
+        .onAppear {
+            guard !resolvedInitialScreen else { return }
+            resolvedInitialScreen = true
+            // Skip the login gate if a session was restored or the user has
+            // previously chosen to continue without an account.
+            if !authManager.shouldShowLoginGate {
+                activeScreen = .profileSelection
+            }
+        }
+    }
+}
+
+/// Root background that reads the appearance settings from the active profile's
+/// store (through the inherited `.defaultAppStorage`), so the theme color follows
+/// the selected profile rather than being shared across all profiles.
+private struct ProfileScopedRootBackground: View {
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+
+    var body: some View {
+        Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
+    }
+}
+
+/// Full-screen backdrop that crossfades between images without flashing the
+/// placeholder colour. `AsyncImage(url:).id(url)` tears the current image down
+/// the instant the URL changes and shows its placeholder until the next image
+/// decodes — which is the "blink" seen when focus moves slowly poster-by-poster.
+/// This keeps the current image on screen, decodes the next one in the
+/// background, and only then fades it in. Rapid URL changes (fast scrolling)
+/// cancel the in-flight load via `.task(id:)`, so the visible image never
+/// changes mid-scroll.
+private struct CrossfadingBackdrop: View {
+    let url: String?
+    let placeholder: Color
+
+    @State private var image: UIImage?
+    @State private var loadedURL: String?
+
+    var body: some View {
+        ZStack {
+            placeholder
+            if let image {
+                Image(uiImage: image)
+                    .resizable()
+                    .aspectRatio(contentMode: .fill)
+                    .transition(.opacity)
+                    .id(loadedURL)
+            }
+        }
+        .task(id: url) {
+            guard let url, url != loadedURL, let imageURL = URL(string: url) else { return }
+            guard let loaded = await BackdropImageCache.shared.image(for: imageURL) else { return }
+            // `.task(id:)` cancels when `url` changes, so reaching here means this
+            // URL is still the focused one. Cancellation leaves the old image up.
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeInOut(duration: 0.44)) {
+                image = loaded
+                loadedURL = url
+            }
+        }
+    }
+}
+
+/// Small in-memory cache + loader for backdrop images so revisiting a poster is
+/// instant (no decode flicker) and repeated focus changes don't refetch.
+private actor BackdropImageCache {
+    static let shared = BackdropImageCache()
+
+    private let cache = NSCache<NSString, UIImage>()
+
+    init() {
+        cache.countLimit = 40
+    }
+
+    func image(for url: URL) async -> UIImage? {
+        let key = url.absoluteString as NSString
+        if let cached = cache.object(forKey: key) { return cached }
+        guard let (data, _) = try? await URLSession.shared.data(from: url),
+              let decoded = UIImage(data: data) else { return nil }
+        cache.setObject(decoded, forKey: key)
+        return decoded
+    }
+}
+
+private struct TVMainTabView: View {
+    @Binding var selectedTab: TVTab
+    let activeProfile: Profile?
+    @ObservedObject var searchViewModel: SearchViewModel
+    @ObservedObject var libraryViewModel: LibraryViewModel
+    let onSwitchProfile: () -> Void
+    let onNavigateToDetails: (String, String) -> Void
+    let onResumePlayback: (ContinueWatchingItem) -> Void
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
+    @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
+
+    /// Name shown on the fallback profile tab (tvOS < 27), mirroring the
+    /// sidebar header's display-name logic.
+    private var profileTabTitle: String {
+        let trimmed = settingsProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? (activeProfile?.name ?? "Nuvio User") : trimmed
+    }
+
+    var body: some View {
+        // `tabViewSidebarHeader` is tvOS 27-only on tvOS, so the styled
+        // avatar+name header only renders there. No public device ships tvOS 27
+        // yet (as of mid-2026), so on every shipping device we fall back to the
+        // profile tab below, whose label carries the profile name + avatar icon.
+        if #available(tvOS 27.0, *) {
+            tabs
+                .tabViewStyle(.sidebarAdaptable)
+                .tabViewSidebarHeader {
+                    TVSidebarProfileHeader(profile: activeProfile, action: onSwitchProfile)
+                }
+        } else if #available(tvOS 18.0, *) {
+            tabs
+                .tabViewStyle(.sidebarAdaptable)
+        } else {
+            tabs
+        }
+    }
+
+    private var tabs: some View {
+        TabView(selection: $selectedTab) {
+            // tvOS 27 surfaces the profile in the sidebar header; older tvOS has
+            // no sidebar-header API, so expose the profile as a dedicated tab.
+            // The tab label carries the profile name + avatar icon so the menu
+            // shows who's signed in instead of a generic "Profile" entry.
+            if #unavailable(tvOS 27.0) {
+                TVProfileTabView(profile: activeProfile, onSwitchProfile: onSwitchProfile)
+                    .tabItem {
+                        Label(profileTabTitle, systemImage: "person.crop.circle.fill")
+                    }
+                    .tag(TVTab.profile)
+            }
+
+            TVHomeView(
+                repository: CinemetaCatalogRepository(),
+                onNavigateToDetails: onNavigateToDetails,
+                onResumePlayback: onResumePlayback
+            )
+                .tabItem {
+                    Label(TVTab.home.rawValue, systemImage: TVTab.home.symbol)
+                }
+                .tag(TVTab.home)
+
+            SearchView(
+                viewModel: searchViewModel,
+                showDiscover: discoverLocation == "Search",
+                onContentClick: onNavigateToDetails
+            )
+                .tabItem {
+                    Label(TVTab.search.rawValue, systemImage: TVTab.search.symbol)
+                }
+                .tag(TVTab.search)
+
+            LibraryView(viewModel: libraryViewModel, onContentClick: onNavigateToDetails)
+                .tabItem {
+                    Label(TVTab.library.rawValue, systemImage: TVTab.library.symbol)
+                }
+                .tag(TVTab.library)
+
+            SettingsView()
+                .tabItem {
+                    Label(TVTab.settings.rawValue, systemImage: TVTab.settings.symbol)
+                }
+                .tag(TVTab.settings)
+        }
+        .background(Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea())
+    }
+}
+
+@available(tvOS 27.0, *)
+private struct TVSidebarProfileHeader: View {
+    let profile: Profile?
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+    @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
+
+    var body: some View {
+        HStack(spacing: 12) {
+            TVSidebarAvatar(profile: profile, isFocused: isFocused)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(displayName)
+                    .font(.system(size: 26, weight: .semibold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                    .layoutPriority(1)
+
+                if isFocused {
+                    Text("Change Profile")
+                        .font(.system(size: 18, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.72))
+                        .lineLimit(1)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                }
+            }
+            .layoutPriority(1)
+
+            Spacer(minLength: 8)
+
+            if !isFocused {
+                TimelineView(.periodic(from: Date(), by: 30)) { context in
+                    Text(context.date, format: .dateTime.hour().minute())
+                        .font(.system(size: 23, weight: .medium))
+                        .foregroundColor(.white.opacity(0.68))
+                        .lineLimit(1)
+                }
+                .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 14)
+        .contentShape(Rectangle())
+        .focusable(true)
+        .focused($isFocused)
+        .focusEffectDisabled()
+        .onTapGesture(perform: action)
+        .animation(.easeInOut(duration: 0.2), value: isFocused)
+    }
+
+    private var displayName: String {
+        let trimmed = settingsProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? (profile?.name ?? "Nuvio User") : trimmed
+    }
+}
+
+private struct TVSidebarAvatar: View {
+    let profile: Profile?
+    let isFocused: Bool
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(Color(red: 1.0, green: 0.82, blue: 0.92))
+
+            Text(initial)
+                .font(.system(size: 20, weight: .heavy))
+                .foregroundColor(Color(red: 0.18, green: 0.12, blue: 0.18))
+        }
+        .frame(width: 44, height: 44)
+        .overlay(
+            Circle()
+                .stroke(Color.white.opacity(0.82), lineWidth: 2)
+        )
+        .scaleEffect(isFocused ? 1.12 : 1)
+        .offset(y: isFocused ? -3 : 0)
+        .shadow(color: .black.opacity(isFocused ? 0.32 : 0), radius: 12, x: 0, y: 8)
+        .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isFocused)
+    }
+
+    private var initial: String {
+        guard let first = profile?.name.trimmingCharacters(in: .whitespacesAndNewlines).first else {
+            return "N"
+        }
+
+        return String(first).uppercased()
+    }
+}
+
+/// Profile screen surfaced as a tab on tvOS versions without the sidebar header
+/// API (< 27), so the active profile stays visible and switchable on device.
+private struct TVProfileTabView: View {
+    let profile: Profile?
+    let onSwitchProfile: () -> Void
+
+    @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(spacing: 30) {
+            TVSidebarAvatar(profile: profile, isFocused: isFocused)
+                .scaleEffect(2.4)
+                .frame(height: 120)
+
+            VStack(spacing: 8) {
+                Text(displayName)
+                    .font(.system(size: 40, weight: .bold))
+                    .foregroundColor(.white)
+
+                Text("Manage who's watching")
+                    .font(.system(size: 22))
+                    .foregroundColor(.white.opacity(0.6))
+            }
+
+            Button(action: onSwitchProfile) {
+                Text("Change Profile")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 44)
+                    .padding(.vertical, 18)
+                    .background(
+                        Capsule().fill(isFocused ? Color.white.opacity(0.22) : Color.white.opacity(0.10))
+                    )
+                    .overlay(
+                        Capsule().strokeBorder(isFocused ? Color.white : Color.white.opacity(0.25), lineWidth: isFocused ? 3 : 1)
+                    )
+            }
+            .buttonStyle(.plain)
+            .focused($isFocused)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private var displayName: String {
+        let trimmed = settingsProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? (profile?.name ?? "Nuvio User") : trimmed
+    }
+}
+
+/// Clips only the top and bottom edges, leaving the horizontal axis unclipped.
+/// The rows container needs vertical clipping (so rows scrolled above/below the
+/// window are hidden) but must NOT clip horizontally -- each card strip already
+/// extends itself to the physical screen edges, and a plain `.clipped()` here
+/// would re-cut the cards at the safe-area margin, making them clip mid-screen
+/// instead of sliding off behind the bezel.
+private struct VerticalEdgeClip: Shape {
+    func path(in rect: CGRect) -> Path {
+        Path(rect.insetBy(dx: -10000, dy: 0))
+    }
+}
+
+/// Collects each home row's top Y (in the rows' own coordinate space) so the
+/// manual vertical offset can glide the focused row flush under the hero.
+private struct HomeRowTopsKey: PreferenceKey {
+    static var defaultValue: [Int: CGFloat] = [:]
+    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
+        value.merge(nextValue()) { _, new in new }
+    }
+}
+
+struct TVHomeView: View {
+    let repository: CatalogRepository
+    let onNavigateToDetails: (String, String) -> Void
+    let onResumePlayback: (ContinueWatchingItem) -> Void
+
+    @AppStorage(SettingsKey.amoled) private var amoled = false
+    @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @AppStorage(SettingsKey.heroEnabled) private var heroEnabled = true
+    @AppStorage(SettingsKey.trailersEnabled) private var trailersEnabled = true
+    @AppStorage(SettingsKey.trailerDelay) private var trailerDelay = 7
+    @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
+    @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
+    @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
+
+    @State private var isLoading = true
+    @State private var hero: NuvioMeta?
+    @State private var focusedMeta: NuvioMeta?
+    @State private var pendingFocusedMeta: NuvioMeta?
+    @State private var focusSettleTask: Task<Void, Never>?
+    @State private var landscapeFocusedId: String?
+    @State private var pendingLandscapeFocusedId: String?
+    @State private var landscapeFocusTask: Task<Void, Never>?
+    @State private var sections: [TVHomeSection] = []
+    @State private var continueWatching: [ContinueWatchingItem] = []
+    @State private var errorMessage: String?
+    @State private var didRequestInitialCardFocus = false
+    @State private var lastFocusedCardID: String?
+    @State private var shouldRestoreHomeFocus = false
+    @State private var focusedRowIndex = 0
+    @State private var rowTops: [Int: CGFloat] = [:]
+    @State private var verticalOffset: CGFloat = 0
+    @FocusState private var isLoadingFocusActive: Bool
+    @FocusState private var focusedCardID: String?
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            // 1. Bottom Layer: Full Screen Crossfading Backdrop
+            CrossfadingBackdrop(
+                url: (visibleFocusedMeta?.backgroundUrl ?? visibleFocusedMeta?.posterUrl) ?? (visibleHero?.backgroundUrl ?? visibleHero?.posterUrl),
+                placeholder: Color.nuvioBackground(amoled: amoled, body: bodyColor)
+            )
+            .ignoresSafeArea()
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            
+            // 2. Gradients overlay for backdrop blending and readability.
+            // Uses the selected body background color (not pure black) so the
+            // chosen theme tint is visible behind the hero on the home screen.
+            let backdropColor = Color.nuvioBackground(amoled: amoled, body: bodyColor)
+            GeometryReader { proxy in
+                LinearGradient(
+                    stops: [
+                        .init(color: backdropColor.opacity(0.94), location: 0),
+                        .init(color: backdropColor.opacity(0.84), location: 0.22),
+                        .init(color: backdropColor.opacity(0.52), location: 0.46),
+                        .init(color: backdropColor.opacity(0.14), location: 0.76),
+                        .init(color: .clear, location: 1)
+                    ],
+                    startPoint: .leading,
+                    endPoint: .trailing
+                )
+                .frame(width: proxy.size.width * 0.58)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            }
+            .ignoresSafeArea()
+
+            GeometryReader { proxy in
+                VStack(spacing: 0) {
+                    Spacer(minLength: 0)
+                    LinearGradient(
+                        stops: [
+                            .init(color: .clear, location: 0),
+                            .init(color: backdropColor.opacity(0.20), location: 0.42),
+                            .init(color: backdropColor.opacity(0.58), location: 0.78),
+                            .init(color: backdropColor, location: 1)
+                        ],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                    .frame(height: proxy.size.height * 0.40)
+                }
+            }
+            .ignoresSafeArea()
+
+            // 3. Scrollable catalog rows overlay, with pinned Hero at the top
+            VStack(alignment: .leading, spacing: 0) {
+                if isLoading {
+                    TVLoadingView()
+                        .overlay {
+                            Color.clear
+                                .frame(width: 1, height: 1)
+                                .focusable(true)
+                                .focused($isLoadingFocusActive)
+                        }
+                        .onAppear {
+                            requestLoadingFocus()
+                        }
+                } else if let errorMessage {
+                    TVErrorView(message: errorMessage)
+                } else {
+                    // Header Hero Meta block (Static, outside ScrollView)
+                    if heroEnabled, let heroMeta = visibleFocusedMeta ?? visibleHero {
+                        TVHeroView(meta: heroMeta) {
+                            onNavigateToDetails(heroMeta.id, heroMeta.type)
+                        }
+                    }
+                    
+                    // Only the rows scroll -- driven by a manual spring offset
+                    // (the vertical analog of the horizontal card strip) so the
+                    // focused row glides flush under the hero with the SAME feel
+                    // and speed as horizontal paging. A GeometryReader imposes a
+                    // definite window so the tall row stack is clipped rather than
+                    // overflowing; the hero stays pinned (it's a sibling above) and
+                    // the focus engine is untouched -- tvOS can focus an off-screen
+                    // row and we simply follow it, exactly like the card strip.
+                    GeometryReader { proxy in
+                        VStack(spacing: 28) {
+                            ForEach(Array(visibleSections.enumerated()), id: \.element.id) { index, section in
+                                if !section.items.isEmpty {
+                                    TVCatalogRow(
+                                        id: section.id,
+                                        title: section.title,
+                                        items: section.items,
+                                        progressByItemId: section.id == TVHomeSection.continueWatchingId ? continueWatchingByMetaId : [:],
+                                        prefersInitialFocus: !didRequestInitialCardFocus && section.id == firstFocusableSectionId,
+                                        landscapeFocusedId: landscapeFocusedId,
+                                        externalFocus: $focusedCardID,
+                                        onInitialFocusRequested: {
+                                            didRequestInitialCardFocus = true
+                                        },
+                                        onFocus: { meta in
+                                            // Only re-anchor vertically when the
+                                            // focused ROW changes -- horizontal
+                                            // moves keep the offset rock-steady so
+                                            // lower rows don't flicker at the clip.
+                                            if focusedRowIndex != index {
+                                                focusedRowIndex = index
+                                                verticalOffset = offsetForRow(index)
+                                            }
+                                            settleFocus(on: meta)
+                                            scheduleLandscapeFocus(cardKey: "\(section.id)\u{1}\(meta.id)")
+                                        },
+                                        onBlur: { meta in
+                                            clearLandscapeFocus(cardKey: "\(section.id)\u{1}\(meta.id)")
+                                        },
+                                        onApproachEnd: { meta in
+                                            loadMoreSectionIfNeeded(sectionId: section.id, currentItem: meta)
+                                        },
+                                        onSelect: { meta in
+                                            if section.id == TVHomeSection.continueWatchingId,
+                                               let item = continueWatchingByMetaId[meta.id] {
+                                                onResumePlayback(item)
+                                            } else {
+                                                onNavigateToDetails(meta.id, meta.type)
+                                            }
+                                        }
+                                    )
+                                    .background(
+                                        GeometryReader { rowGeo in
+                                            Color.clear.preference(
+                                                key: HomeRowTopsKey.self,
+                                                value: [index: rowGeo.frame(in: .named("homeRows")).minY.rounded()]
+                                            )
+                                        }
+                                    )
+                                }
+                            }
+                        }
+                        .padding(.top, 20)
+                        .frame(width: proxy.size.width, alignment: .topLeading)
+                        .coordinateSpace(name: "homeRows")
+                        .offset(y: verticalOffset)
+                        .animation(smoothFocus ? .spring(response: 0.4, dampingFraction: 0.95) : nil, value: verticalOffset)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                    .clipShape(VerticalEdgeClip())
+                    .onPreferenceChange(HomeRowTopsKey.self) { newTops in
+                        rowTops = newTops
+                        // Keep the focused row anchored if measurements settle or
+                        // sections load in -- recompute from the fresh values.
+                        if let focusedTop = newTops[focusedRowIndex] {
+                            let firstTop = newTops.values.min() ?? focusedTop
+                            let target = -(focusedTop - firstTop)
+                            if target != verticalOffset { verticalOffset = target }
+                        }
+                    }
+                    // Treat the rows as a focus section so focus can jump in/out
+                    // cleanly. The default focus is only armed after Home loses
+                    // focus, so the first Menu press can still reach the sidebar,
+                    // while returning from the sidebar restores the saved card.
+                    .focusSection()
+                    .defaultFocusIfAvailable($focusedCardID, shouldRestoreHomeFocus ? lastFocusedCardID : nil)
+                }
+            }
+            .ignoresSafeArea(.container, edges: .top)
+        }
+        .task {
+            await load()
+        }
+        .onAppear {
+            refreshContinueWatching()
+        }
+        .onDisappear {
+            focusSettleTask?.cancel()
+            landscapeFocusTask?.cancel()
+        }
+        .onChange(of: isLoading) { loading in
+            if loading {
+                requestLoadingFocus()
+            }
+        }
+        .onChange(of: focusedCardID) { newValue in
+            if let newValue {
+                lastFocusedCardID = newValue
+                shouldRestoreHomeFocus = false
+            } else if lastFocusedCardID != nil {
+                shouldRestoreHomeFocus = true
+            }
+        }
+    }
+
+    private var firstFocusableSectionId: String? {
+        visibleSections.first(where: { !$0.items.isEmpty })?.id
+    }
+
+    /// Vertical translation that lands the row at `index` where the first row
+    /// sits (flush under the hero) -- the vertical analog of the card strip
+    /// pinning the focused card under the row title. Returns the current offset
+    /// when that row hasn't been measured yet, so we never jump to 0 mid-scroll.
+    private func offsetForRow(_ index: Int) -> CGFloat {
+        guard let focusedTop = rowTops[index] else { return verticalOffset }
+        let firstTop = rowTops.values.min() ?? focusedTop
+        return -(focusedTop - firstTop)
+    }
+
+    private var visibleSections: [TVHomeSection] {
+        let resumeSection = TVHomeSection(
+            id: TVHomeSection.continueWatchingId,
+            title: "Continue Watching",
+            items: continueWatching.map(\.meta)
+        )
+        let allSections = continueWatching.isEmpty ? sections : [resumeSection] + sections
+
+        return allSections.map { section in
+            TVHomeSection(id: section.id, title: section.title, items: section.items.filter(isVisible))
+        }
+    }
+
+    private var continueWatchingByMetaId: [String: ContinueWatchingItem] {
+        Dictionary(uniqueKeysWithValues: continueWatching.map { ($0.meta.id, $0) })
+    }
+
+    private var visibleHero: NuvioMeta? {
+        guard let hero, isVisible(hero) else { return visibleSections.first?.items.first }
+        return hero
+    }
+
+    private var visibleFocusedMeta: NuvioMeta? {
+        guard let focusedMeta, isVisible(focusedMeta) else { return nil }
+        return focusedMeta
+    }
+
+    private func isVisible(_ meta: NuvioMeta) -> Bool {
+        guard hideUnreleased else { return true }
+        return !isUnreleased(meta)
+    }
+
+    private func isUnreleased(_ meta: NuvioMeta) -> Bool {
+        let currentYear = Calendar.current.component(.year, from: Date())
+        if let year = meta.year, year > currentYear {
+            return true
+        }
+        if let releasedYear = leadingYear(from: meta.released), releasedYear > currentYear {
+            return true
+        }
+        if let releaseInfoYear = leadingYear(from: meta.releaseInfo), releaseInfoYear > currentYear {
+            return true
+        }
+        return false
+    }
+
+    private func leadingYear(from value: String?) -> Int? {
+        guard let value else { return nil }
+        let prefix = value.prefix(4)
+        guard prefix.count == 4 else { return nil }
+        return Int(prefix)
+    }
+
+    private func requestLoadingFocus() {
+        DispatchQueue.main.async {
+            isLoadingFocusActive = true
+        }
+    }
+
+    @MainActor
+    private func load() async {
+        isLoading = true
+        errorMessage = nil
+
+        do {
+            let catalogs = try await repository.getHomeCatalogs()
+            var loadedSections: [TVHomeSection] = []
+
+            for catalog in catalogs {
+                var items: [NuvioMeta] = []
+                for id in catalog.itemIds.prefix(18) {
+                    if let meta = try? await repository.getMetadata(id: id, type: catalog.contentType ?? "movie") {
+                        items.append(meta)
+                    }
+                }
+
+                loadedSections.append(
+                    TVHomeSection(
+                        id: catalog.id,
+                        title: catalog.name,
+                        items: items,
+                        contentType: catalog.contentType,
+                        catalogId: catalog.catalogId,
+                        nextSkip: items.count,
+                        hasMore: catalog.contentType != nil && catalog.catalogId != nil && !items.isEmpty
+                    )
+                )
+            }
+
+            sections = loadedSections
+            refreshContinueWatching()
+            hero = loadedSections.first?.items.first
+            focusedMeta = loadedSections.first?.items.first
+            pendingFocusedMeta = focusedMeta
+            landscapeFocusedId = nil
+            pendingLandscapeFocusedId = nil
+            didRequestInitialCardFocus = false
+            lastFocusedCardID = nil
+            shouldRestoreHomeFocus = false
+            isLoading = false
+        } catch {
+            errorMessage = error.localizedDescription
+            isLoading = false
+        }
+    }
+
+    private func settleFocus(on meta: NuvioMeta) {
+        pendingFocusedMeta = meta
+        focusSettleTask?.cancel()
+
+        let targetId = meta.id
+        focusSettleTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: fastNavigation ? 60_000_000 : 140_000_000)
+            guard !Task.isCancelled,
+                  pendingFocusedMeta?.id == targetId,
+                  focusedMeta?.id != targetId,
+                  let settledMeta = pendingFocusedMeta else {
+                return
+            }
+
+            focusedMeta = settledMeta
+        }
+    }
+
+    @MainActor
+    private func loadMoreSectionIfNeeded(sectionId: String, currentItem: NuvioMeta) {
+        guard let sectionIndex = sections.firstIndex(where: { $0.id == sectionId }) else { return }
+        let section = sections[sectionIndex]
+        guard section.hasMore,
+              !section.isLoadingMore,
+              let contentType = section.contentType,
+              let catalogId = section.catalogId,
+              let itemIndex = section.items.firstIndex(where: { $0.id == currentItem.id }),
+              itemIndex >= max(section.items.count - TVHomeRowPrefetchThreshold, 0) else {
+            return
+        }
+
+        let requestedSkip = section.nextSkip ?? section.items.count
+        sections[sectionIndex].isLoadingMore = true
+
+        Task { @MainActor in
+            do {
+                let page = try await repository.browseCatalog(
+                    contentType: contentType,
+                    catalogId: catalogId,
+                    skip: requestedSkip,
+                    genre: nil
+                )
+
+                guard let latestIndex = sections.firstIndex(where: { $0.id == sectionId }) else { return }
+                let existingIds = Set(sections[latestIndex].items.map(\.id))
+                let newItems = page.items.filter { !existingIds.contains($0.id) }
+
+                sections[latestIndex].items.append(contentsOf: newItems)
+                sections[latestIndex].nextSkip = page.nextSkip ?? (requestedSkip + page.items.count)
+                sections[latestIndex].hasMore = page.hasMore && !newItems.isEmpty
+                sections[latestIndex].isLoadingMore = false
+            } catch {
+                guard let latestIndex = sections.firstIndex(where: { $0.id == sectionId }) else { return }
+                sections[latestIndex].isLoadingMore = false
+            }
+        }
+    }
+
+    private func scheduleLandscapeFocus(cardKey: String) {
+        guard trailersEnabled else {
+            pendingLandscapeFocusedId = nil
+            landscapeFocusedId = nil
+            landscapeFocusTask?.cancel()
+            return
+        }
+
+        pendingLandscapeFocusedId = cardKey
+        landscapeFocusedId = nil
+        landscapeFocusTask?.cancel()
+
+        let targetKey = cardKey
+        let delaySeconds = max(1, trailerDelay)
+        landscapeFocusTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: UInt64(delaySeconds) * 1_000_000_000)
+            guard !Task.isCancelled,
+                  pendingLandscapeFocusedId == targetKey else {
+                return
+            }
+
+            landscapeFocusedId = targetKey
+        }
+    }
+
+    private func clearLandscapeFocus(cardKey: String) {
+        if pendingLandscapeFocusedId == cardKey {
+            pendingLandscapeFocusedId = nil
+            landscapeFocusTask?.cancel()
+        }
+
+        if landscapeFocusedId == cardKey {
+            landscapeFocusedId = nil
+        }
+    }
+
+    private func refreshContinueWatching() {
+        continueWatching = ContinueWatchingStore.items().filter { isVisible($0.meta) }
+    }
+}
+
+private struct TVHomeSection: Identifiable {
+    static let continueWatchingId = "continue_watching"
+
+    let id: String
+    let title: String
+    var items: [NuvioMeta]
+    var contentType: String? = nil
+    var catalogId: String? = nil
+    var nextSkip: Int? = nil
+    var hasMore: Bool = false
+    var isLoadingMore: Bool = false
+}
+
+private let TVHomeRowPrefetchThreshold = 6
+
+private struct TVHeroView: View {
+    let meta: NuvioMeta
+    let onSelect: () -> Void
+    @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if let logoUrl = meta.logoUrl {
+                AsyncImage(url: URL(string: logoUrl)) { phase in
+                    if case .success(let image) = phase {
+                        image
+                            .resizable()
+                            .scaledToFit()
+                    } else {
+                        Text(meta.name)
+                            .font(.custom("Inter-Bold", size: 54))
+                    }
+                }
+                .frame(width: 440, height: 114, alignment: .leading)
+            } else {
+                Text(meta.name)
+                    .font(.custom("Inter-Bold", size: 54))
+                    .lineLimit(2)
+                    .foregroundColor(.white)
+            }
+
+            TVHeroMetaLine(meta: meta)
+
+            if let description = meta.description {
+                Text(description.wrappedEveryNWords(9))
+                    .font(.custom("Inter-Regular", size: 24))
+                    .foregroundColor(.white)
+                    .lineSpacing(3)
+                    .lineLimit(4)
+                    .frame(maxWidth: 900, alignment: .leading)
+                    .padding(.top, 4)
+            }
+        }
+        .foregroundColor(.white)
+        .padding(.leading, TVLayout.rowLeading)
+        .padding(.top, homeLayout == "Compact" ? 82 : 140)
+        .padding(.bottom, 20)
+        .frame(height: homeLayout == "Compact" ? 390 : 500, alignment: .bottomLeading)
+    }
+}
+
+private struct TVCatalogRow: View {
+    let id: String
+    let title: String
+    let items: [NuvioMeta]
+    var progressByItemId: [String: ContinueWatchingItem] = [:]
+    let prefersInitialFocus: Bool
+    let landscapeFocusedId: String?
+    var externalFocus: FocusState<String?>.Binding? = nil
+    let onInitialFocusRequested: () -> Void
+    let onFocus: (NuvioMeta) -> Void
+    let onBlur: (NuvioMeta) -> Void
+    let onApproachEnd: (NuvioMeta) -> Void
+    let onSelect: (NuvioMeta) -> Void
+
+    // Index of the card whose leading edge is pinned under the title. Driven by
+    // focus and intentionally NOT reset on blur, so the row keeps its position
+    // when focus moves to another row and comes back (tvOS focus memory).
+    @State private var scrollIndex: Int = 0
+    @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
+    @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
+    @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
+
+    private var compactPosterWidth: CGFloat {
+        homeLayout == "Compact" ? 170 : 210
+    }
+
+    private var rowSpacing: CGFloat {
+        homeLayout == "Compact" ? 22 : 28
+    }
+
+    // Step between successive (portrait) card leading edges. Only the focused
+    // card ever becomes landscape, and that never changes the leading edge of
+    // cards before it, so the step is always the portrait width + spacing.
+    private var step: CGFloat { compactPosterWidth + rowSpacing }
+
+    // Card height (315) + vertical breathing room for the focus border/shadow.
+    private var stripHeight: CGFloat {
+        let imageHeight: CGFloat = homeLayout == "Compact" ? 255 : 315
+        return imageHeight + (posterLabels ? 48 : 0) + 56
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title)
+                .font(.custom("Inter-Bold", size: 30))
+                .foregroundColor(.white)
+                .padding(.leading, TVLayout.rowLeading)
+
+            cardStrip
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    // A definite-size clipping window for the cards. A GeometryReader imposes
+    // its OWN frame size and never grows to fit its (very wide) child, so the
+    // overflowing HStack can no longer blow out the parent width -- which was
+    // what hid the row titles and the hero block. The cards still slide inside
+    // the window via a manual offset; overflow is clipped.
+    private var cardStrip: some View {
+        GeometryReader { geo in
+            let edgeInset = max(0, geo.frame(in: .global).minX)
+            let stripWidth = geo.size.width + edgeInset * 2
+
+            HStack(alignment: .bottom, spacing: rowSpacing) {
+                ForEach(items) { item in
+                    let shouldRequestInitialFocus = prefersInitialFocus && item.id == items.first?.id
+                    let progressItem = progressByItemId[item.id]
+                    PosterCard(
+                        meta: item,
+                        isLandscape: homeLayout == "Modern" && landscapeFocusedId == "\(id)\u{1}\(item.id)",
+                        continueProgress: progressItem?.progress,
+                        continueRemainingText: progressItem?.remainingText,
+                        shouldRequestInitialFocus: shouldRequestInitialFocus,
+                        onInitialFocusRequested: shouldRequestInitialFocus ? onInitialFocusRequested : nil,
+                        onFocus: { focused in
+                            if let index = items.firstIndex(where: { $0.id == focused.id }) {
+                                scrollIndex = index
+                            }
+                            onApproachEnd(focused)
+                            onFocus(focused)
+                        },
+                        onBlur: { blurred in
+                            onBlur(blurred)
+                        },
+                        externalFocus: externalFocus,
+                        externalFocusValue: "\(id)\u{1}\(item.id)"
+                    ) {
+                        onSelect(item)
+                    }
+                }
+            }
+            .padding(.vertical, 28)
+            // Pin the focused card's leading edge directly under the title
+            // (TVLayout.rowLeading) by translating the strip left scrollIndex steps.
+            // The clipping window expands to the physical screen edge while the
+            // card offset stays in the row's safe-area coordinate space.
+            // tvOS overrides ScrollViewReader.scrollTo (no-op once a card is
+            // already on-screen, which the focus engine guarantees), so we
+            // position manually -- mirroring the Android TV BringIntoViewSpec.
+            .offset(x: edgeInset + TVLayout.rowLeading - CGFloat(scrollIndex) * step)
+            .frame(width: stripWidth, height: stripHeight, alignment: .leading)
+            .clipped()
+            .offset(x: -edgeInset)
+            .animation(smoothFocus ? .spring(response: 0.4, dampingFraction: 0.95) : nil, value: scrollIndex)
+            .animation(smoothFocus ? .spring(response: 0.18, dampingFraction: 0.86) : nil, value: landscapeFocusedId)
+        }
+        .frame(height: stripHeight)
+    }
+}
+
+private struct TVHeroMetaLine: View {
+    let meta: NuvioMeta
+    @AppStorage(SettingsKey.showFullDates) private var showFullDates = true
+
+    var body: some View {
+        let values = [
+            meta.type.capitalized,
+            meta.genres?.first,
+            formattedRuntime,
+            releaseDate,
+            meta.rating.map { String(format: "%.1f IMDb", $0) }
+        ].compactMap { $0 }.filter { !$0.isEmpty }
+
+        Text(values.joined(separator: "  •  "))
+            .font(.custom("Inter-SemiBold", size: 22))
+            .foregroundColor(.white.opacity(0.66))
+            .lineLimit(1)
+    }
+
+    private var formattedRuntime: String? {
+        Self.formatRuntime(meta.runtime)
+    }
+
+    private var releaseDate: String? {
+        if showFullDates, let released = meta.released, !released.isEmpty {
+            return NuvioDateDisplay.formattedDate(released)
+        }
+        return meta.year.map(String.init)
+    }
+
+    private static func formatRuntime(_ runtime: String?) -> String? {
+        guard let runtime = runtime?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !runtime.isEmpty else {
+            return nil
+        }
+
+        let normalized = runtime.lowercased()
+        let hours = firstNumber(in: normalized, pattern: #"(\d+)\s*h"#)
+        let minutes = firstNumber(in: normalized, pattern: #"(\d+)\s*m(?:in)?"#)
+        let totalMinutes: Int?
+
+        if hours != nil || minutes != nil {
+            totalMinutes = (hours ?? 0) * 60 + (minutes ?? 0)
+        } else {
+            totalMinutes = Int(normalized.filter(\.isNumber))
+        }
+
+        guard let totalMinutes else {
+            return runtime
+        }
+
+        let wholeHours = totalMinutes / 60
+        let remainingMinutes = totalMinutes % 60
+
+        if wholeHours > 0 && remainingMinutes > 0 {
+            return "\(wholeHours)h \(remainingMinutes)m"
+        } else if wholeHours > 0 {
+            return "\(wholeHours)h"
+        } else {
+            return "\(remainingMinutes)m"
+        }
+    }
+
+    private static func firstNumber(in value: String, pattern: String) -> Int? {
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(
+                in: value,
+                range: NSRange(value.startIndex..<value.endIndex, in: value)
+              ),
+              let range = Range(match.range(at: 1), in: value) else {
+            return nil
+        }
+
+        return Int(value[range])
+    }
+}
+
+
+private struct TVLoadingView: View {
+    var body: some View {
+        VStack(spacing: 18) {
+            ProgressView()
+                .scaleEffect(1.4)
+            Text("Loading catalog")
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundColor(.white.opacity(0.62))
+        }
+        .frame(maxWidth: .infinity, minHeight: 620)
+        .focusable(true)
+    }
+}
+
+private struct TVErrorView: View {
+    let message: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Catalog failed")
+                .font(.largeTitle.bold())
+            Text(message)
+                .font(.title3)
+                .foregroundColor(.white.opacity(0.68))
+        }
+        .foregroundColor(.white)
+        .padding(.leading, TVLayout.contentLeading)
+        .frame(maxWidth: .infinity, minHeight: 560, alignment: .leading)
+        .focusable(true)
+    }
+}
+
+enum NuvioDateDisplay {
+    static func formattedDate(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty else {
+            return nil
+        }
+
+        let datePart = String(raw.prefix(10))
+        guard datePart.count == 10,
+              let date = isoDay.date(from: datePart) else {
+            return raw
+        }
+
+        return display.string(from: date)
+    }
+
+    private static let isoDay: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    private static let display: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "MMMM d, yyyy"
+        return f
+    }()
+}
+
+private enum TVLayout {
+    static let contentLeading: CGFloat = 150
+    static let rowLeading: CGFloat = 48
+}
+
+extension Color {
+    static let tvBackground = Color(red: 0.015, green: 0.015, blue: 0.018)
+    static let tvCard = Color(red: 0.105, green: 0.108, blue: 0.115)
+    static let tvAccent = Color(red: 0.94, green: 0.13, blue: 0.13)
+
+    /// App body background. AMOLED forces pure black; otherwise the selected
+    /// background tint (Settings → Appearance → App Background) is used.
+    static func nuvioBackground(amoled: Bool, body: String = SettingsBackground.charcoal.rawValue) -> Color {
+        amoled ? .black : SettingsBackground.color(for: body)
+    }
+
+    /// Builds a color from a `#RRGGBB` (or `RRGGBB`) hex string. Falls back to
+    /// white for malformed input. Used by the subtitle styling swatches/preview.
+    init(hex: String) {
+        let raw = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        var value: UInt64 = 0xFFFFFF
+        Scanner(string: String(raw.prefix(6))).scanHexInt64(&value)
+        self.init(
+            red: Double((value >> 16) & 0xFF) / 255.0,
+            green: Double((value >> 8) & 0xFF) / 255.0,
+            blue: Double(value & 0xFF) / 255.0
+        )
+    }
+}
+
+extension String {
+    /// Inserts a hard line break after every `n` whitespace-separated words, so
+    /// long descriptions wrap at a fixed word count (hero + details on tvOS).
+    func wrappedEveryNWords(_ n: Int) -> String {
+        guard n > 0 else { return self }
+        let words = split(whereSeparator: { $0.isWhitespace })
+        guard words.count > n else { return self }
+
+        var lines: [String] = []
+        var index = 0
+        while index < words.count {
+            let end = Swift.min(index + n, words.count)
+            lines.append(words[index..<end].joined(separator: " "))
+            index += n
+        }
+        return lines.joined(separator: "\n")
+    }
+}

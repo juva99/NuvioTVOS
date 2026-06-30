@@ -1,0 +1,317 @@
+import Foundation
+import Combine
+
+// MARK: - Stub types replacing NuvioCore Rust FFI types
+
+/// Stub for Rust-generated Profile type
+public struct Profile: Equatable, Hashable, Identifiable {
+    public var id: String
+    public var name: String
+    public var isPinProtected: Bool
+    public var isAdmin: Bool
+    public var avatarId: String
+
+    public init(id: String, name: String, isPinProtected: Bool = false, isAdmin: Bool = false, avatarId: String = "default") {
+        self.id = id
+        self.name = name
+        self.isPinProtected = isPinProtected
+        self.isAdmin = isAdmin
+        self.avatarId = avatarId
+    }
+}
+
+/// Stub for Rust-generated StremioMeta type (used by Library and Search ViewModels)
+public struct StremioMeta: Equatable, Hashable, Identifiable {
+    public var id: String
+    public var name: String
+    public var contentType: String
+    public var poster: String?
+    public var background: String?
+    public var logo: String?
+    public var description: String?
+    public var releaseInfo: String?
+    public var imdbRating: String?
+    public var year: Int32?
+    public var genres: [String]?
+    public var runtime: String?
+
+    public init(id: String, name: String, contentType: String, poster: String? = nil,
+                background: String? = nil, logo: String? = nil, description: String? = nil,
+                releaseInfo: String? = nil, imdbRating: String? = nil, year: Int32? = nil,
+                genres: [String]? = nil, runtime: String? = nil) {
+        self.id = id
+        self.name = name
+        self.contentType = contentType
+        self.poster = poster
+        self.background = background
+        self.logo = logo
+        self.description = description
+        self.releaseInfo = releaseInfo
+        self.imdbRating = imdbRating
+        self.year = year
+        self.genres = genres
+        self.runtime = runtime
+    }
+}
+
+/// Stub for Rust-generated WatchedItem type
+public struct WatchedItem: Equatable, Hashable, Identifiable {
+    public var id: String
+    public var metaId: String
+    public var metaType: String
+    public var progressPercent: Double
+    public var lastWatched: Int64
+
+    public init(id: String, metaId: String, metaType: String, progressPercent: Double, lastWatched: Int64) {
+        self.id = id
+        self.metaId = metaId
+        self.metaType = metaType
+        self.progressPercent = progressPercent
+        self.lastWatched = lastWatched
+    }
+}
+
+// MARK: - ProfileManager stub (replaces Rust FFI class)
+
+/// Pure Swift stub for ProfileManager — persists via UserDefaults
+public class ProfileManager {
+    private static let profilesKey = "nuvio.profiles"
+    private static let activePinKey = "nuvio.active_profile_id"
+
+    public init(baseDir: String) throws {
+        // No-op for stub — we use UserDefaults
+    }
+
+    public func getProfiles() throws -> [Profile] {
+        guard let data = UserDefaults.standard.data(forKey: Self.profilesKey),
+              let decoded = try? JSONDecoder().decode([StoredProfile].self, from: data) else {
+            return []
+        }
+        return decoded.map { $0.toProfile() }
+    }
+
+    public func createProfile(input: CreateProfileInput) throws -> Profile {
+        var profiles = (try? getProfiles()) ?? []
+        let profile = Profile(
+            id: UUID().uuidString,
+            name: input.name,
+            isPinProtected: input.pin != nil,
+            isAdmin: false,
+            avatarId: input.avatarId ?? "default"
+        )
+        profiles.append(profile)
+        saveProfiles(profiles)
+        return profile
+    }
+
+    public func getActiveProfile() throws -> Profile? {
+        let profiles = (try? getProfiles()) ?? []
+        if let id = UserDefaults.standard.string(forKey: Self.activePinKey) {
+            return profiles.first(where: { $0.id == id })
+        }
+        return profiles.first
+    }
+
+    public func switchProfile(id: String) throws {
+        UserDefaults.standard.set(id, forKey: Self.activePinKey)
+    }
+
+    public func deleteProfile(id: String) throws {
+        var profiles = (try? getProfiles()) ?? []
+        profiles.removeAll(where: { $0.id == id })
+        saveProfiles(profiles)
+    }
+
+    public func verifyPin(id: String, pin: String) throws -> Bool {
+        // Stub: always valid (real PIN verification would come from Rust)
+        return true
+    }
+
+    private func saveProfiles(_ profiles: [Profile]) {
+        let stored = profiles.map { StoredProfile(from: $0) }
+        if let data = try? JSONEncoder().encode(stored) {
+            UserDefaults.standard.set(data, forKey: Self.profilesKey)
+        }
+    }
+}
+
+// Codable helper for UserDefaults persistence
+private struct StoredProfile: Codable {
+    var id: String
+    var name: String
+    var isPinProtected: Bool
+    var isAdmin: Bool
+    var avatarId: String
+
+    init(from profile: Profile) {
+        self.id = profile.id
+        self.name = profile.name
+        self.isPinProtected = profile.isPinProtected
+        self.isAdmin = profile.isAdmin
+        self.avatarId = profile.avatarId
+    }
+
+    func toProfile() -> Profile {
+        Profile(id: id, name: name, isPinProtected: isPinProtected, isAdmin: isAdmin, avatarId: avatarId)
+    }
+}
+
+/// Input for creating a profile
+public struct CreateProfileInput {
+    public var name: String
+    public var profileType: ProfileTypeStub
+    public var avatarId: String?
+    public var maxAgeRating: String?
+    public var pin: String?
+
+    public init(name: String, profileType: ProfileTypeStub = .adult, avatarId: String? = nil, maxAgeRating: String? = nil, pin: String? = nil) {
+        self.name = name
+        self.profileType = profileType
+        self.avatarId = avatarId
+        self.maxAgeRating = maxAgeRating
+        self.pin = pin
+    }
+}
+
+public enum ProfileTypeStub {
+    case admin, adult, kids
+}
+
+// Alias so ProfileViewModel can use .admin / .adult without changes
+typealias ProfileType = ProfileTypeStub
+
+// MARK: - ProfileViewModel (pure Swift, no Rust dependency)
+
+@MainActor
+public class ProfileViewModel: ObservableObject {
+    @Published public var profiles: [Profile] = []
+    @Published public var activeProfile: Profile?
+    @Published public var isPinEntryVisible = false
+    @Published public var pinError: String?
+    @Published public var isLoading = false
+    @Published public var pendingProfileId: String?
+
+    private let profileManager: ProfileManager?
+
+    public init(profileManager: ProfileManager? = nil) {
+        if let manager = profileManager {
+            self.profileManager = manager
+        } else {
+            let documentsPath = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
+            do {
+                self.profileManager = try ProfileManager(baseDir: documentsPath)
+            } catch {
+                print("Failed to initialize ProfileManager: \(error)")
+                self.profileManager = nil
+            }
+        }
+        loadProfiles()
+        loadActiveProfile()
+    }
+
+    public func loadProfiles() {
+        guard let manager = profileManager else {
+            // Seed a default profile so the UI isn't empty
+            if profiles.isEmpty {
+                profiles = [Profile(id: UUID().uuidString, name: "Nuvio User", isPinProtected: false, isAdmin: true, avatarId: "default")]
+            }
+            return
+        }
+        do {
+            var list = try manager.getProfiles()
+            if list.isEmpty {
+                let input = CreateProfileInput(name: "Nuvio Guest", profileType: .admin, avatarId: "default")
+                _ = try manager.createProfile(input: input)
+                list = try manager.getProfiles()
+            }
+            self.profiles = list
+        } catch {
+            print("Failed to load profiles: \(error)")
+        }
+    }
+
+    public func loadActiveProfile() {
+        guard let manager = profileManager else {
+            let profile = profiles.first
+            // Scope watch history and settings to this profile before the UI reads them.
+            ContinueWatchingStore.setActiveProfile(profile?.id)
+            ProfileSettings.setActiveProfile(profile?.id)
+            self.activeProfile = profile
+            return
+        }
+        do {
+            let profile = try manager.getActiveProfile()
+            // Scope watch history and settings to this profile before the UI reads them.
+            ContinueWatchingStore.setActiveProfile(profile?.id)
+            ProfileSettings.setActiveProfile(profile?.id)
+            self.activeProfile = profile
+        } catch {
+            print("Failed to load active profile: \(error)")
+        }
+    }
+
+    public func createProfile(name: String, pin: String?) {
+        guard let manager = profileManager else { return }
+        isLoading = true
+        let input = CreateProfileInput(name: name, profileType: .adult, avatarId: "default", pin: pin)
+        Task {
+            do {
+                let newProfile = try manager.createProfile(input: input)
+                // Start the new profile as a copy of the current settings; it
+                // diverges independently from then on.
+                ProfileSettings.seedNewProfile(newProfile.id)
+                loadProfiles()
+                isLoading = false
+            } catch {
+                print("Failed to create profile: \(error)")
+                isLoading = false
+            }
+        }
+    }
+
+    public func requestSwitch(to profile: Profile) {
+        if profile.isPinProtected {
+            self.pendingProfileId = profile.id
+            self.isPinEntryVisible = true
+        } else {
+            switchProfile(id: profile.id, pin: nil)
+        }
+    }
+
+    public func verifyAndSwitch(pin: String) {
+        guard let id = pendingProfileId else { return }
+        switchProfile(id: id, pin: pin)
+    }
+
+    private func switchProfile(id: String, pin: String?) {
+        if let pin = pin, !pin.isEmpty {
+            // Stub: accept any PIN
+            _ = pin
+        }
+        do {
+            try profileManager?.switchProfile(id: id)
+            loadActiveProfile()
+            isPinEntryVisible = false
+            pendingProfileId = nil
+            pinError = nil
+        } catch {
+            print("Failed to switch profile: \(error)")
+        }
+    }
+}
+
+/// Stub for Rust-generated StremioService
+public class StremioService {
+    public init() throws {}
+    
+    public func getCatalog(addonId: String, contentType: String, catalogId: String, page: Int32, search: String?) async throws -> [StremioMeta] {
+        // Return mock search results
+        if let query = search, !query.isEmpty {
+            return [
+                StremioMeta(id: "mock1", name: "\(query) Result 1", contentType: contentType),
+                StremioMeta(id: "mock2", name: "\(query) Result 2", contentType: contentType)
+            ]
+        }
+        return []
+    }
+}
