@@ -432,6 +432,13 @@ private struct StremioStreamBehaviorHints: Decodable {
     let videoSize: Int64?
 }
 
+private extension String {
+    var trimmedNonEmpty: String? {
+        let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+}
+
 private struct CinemetaMeta: Decodable {
     let id: String
     let name: String
@@ -454,11 +461,13 @@ private struct CinemetaMeta: Decodable {
     let moviedbId: Int?
     let status: String?
     let videos: [CinemetaVideo]?
+    let trailers: [CinemetaTrailer]?
+    let trailerStreams: [CinemetaTrailerStream]?
 
     enum CodingKeys: String, CodingKey {
         case id, name, type, description, poster, background, logo, imdbRating
         case genres, genre, releaseInfo, year, runtime, cast, director, writer, country, released
-        case status, videos
+        case status, videos, trailers, trailerStreams
         case moviedbId = "moviedb_id"
     }
 
@@ -485,8 +494,16 @@ private struct CinemetaMeta: Decodable {
             country: country,
             released: released,
             status: status,
-            videos: videos?.compactMap { $0.toVideo() }
+            videos: videos?.compactMap { $0.toVideo() },
+            trailerYtIds: trailerYtIds
         )
+    }
+
+    private var trailerYtIds: [String] {
+        var seen: Set<String> = []
+        return ((trailers?.compactMap { $0.youtubeId } ?? []) +
+                (trailerStreams?.compactMap { $0.ytId?.trimmedNonEmpty } ?? []))
+            .filter { seen.insert($0).inserted }
     }
 
     private var parsedYear: Int? {
@@ -495,6 +512,19 @@ private struct CinemetaMeta: Decodable {
         let digits = source.prefix(4)
         return Int(digits)
     }
+}
+
+private struct CinemetaTrailer: Decodable {
+    let source: String?
+    let ytId: String?
+
+    var youtubeId: String? {
+        (source ?? ytId)?.trimmedNonEmpty
+    }
+}
+
+private struct CinemetaTrailerStream: Decodable {
+    let ytId: String?
 }
 
 private struct CinemetaVideo: Decodable {

@@ -6,6 +6,7 @@ public class LibraryViewModel: ObservableObject {
     @Published public var items: [StremioMeta] = []
     @Published public var sortOption: SortOption = .dateAdded
     @Published public var groupOption: GroupOption = .none
+    private var libraryObserver: NSObjectProtocol?
     
     public enum SortOption: String, CaseIterable, Identifiable {
         case dateAdded = "Date Added"
@@ -24,22 +25,38 @@ public class LibraryViewModel: ObservableObject {
     
     public init() {
         loadLibrary()
+        libraryObserver = NotificationCenter.default.addObserver(
+            forName: LibraryStore.changedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                self?.loadLibrary()
+            }
+        }
+    }
+
+    deinit {
+        if let libraryObserver {
+            NotificationCenter.default.removeObserver(libraryObserver)
+        }
     }
     
     public func loadLibrary() {
-        // Mock data
-        self.items = []
+        self.items = LibraryStore.items().map(\.stremioMeta)
     }
     
     public var sortedAndGroupedItems: [String: [StremioMeta]] {
         var result: [String: [StremioMeta]] = [:]
         
-        let sorted = items.sorted { first, second in
-            switch sortOption {
-            case .dateAdded: return true // Mock
-            case .title: return first.name < second.name
-            case .year: return (first.releaseInfo ?? "") > (second.releaseInfo ?? "")
-            }
+        let sorted: [StremioMeta]
+        switch sortOption {
+        case .dateAdded:
+            sorted = items
+        case .title:
+            sorted = items.sorted { $0.name < $1.name }
+        case .year:
+            sorted = items.sorted { ($0.releaseInfo ?? "") > ($1.releaseInfo ?? "") }
         }
         
         switch groupOption {

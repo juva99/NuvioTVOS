@@ -8,6 +8,7 @@
 
 import Foundation
 import SwiftUI
+import UIKit
 
 struct DetailsScreen: View {
     let id: String
@@ -30,6 +31,8 @@ struct DetailsScreen: View {
     @AppStorage(SettingsKey.subtitleLanguage) private var subtitleLanguage = "System"
     @AppStorage(SettingsKey.subtitleLanguageSecondary) private var subtitleLanguageSecondary = "None"
     @AppStorage(SettingsKey.subtitleLanguageTertiary) private var subtitleLanguageTertiary = "None"
+    @AppStorage(SettingsKey.tmdbEnabled) private var tmdbEnabled = false
+    @AppStorage(SettingsKey.tmdbApiKey) private var tmdbApiKey = ""
 
     init(
         id: String,
@@ -73,8 +76,9 @@ struct DetailsScreen: View {
                         startStreamFlow(streamId: video.id, type: "series", reload: true)
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
-                    onRateClick: { /* TODO: Show rating dialog */ },
+                    onRateClick: { viewModel.toggleWatched() },
                     onShareClick: { shareContent(viewModel.uiState.meta!) },
+                    onTrailerClick: { openTrailer(for: viewModel.uiState.meta!) },
                     onBack: onBack
                 )
                 // While the stream picker is open it sits on top as a full-screen
@@ -91,7 +95,7 @@ struct DetailsScreen: View {
                         }
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
-                    onRateClick: { /* TODO: Show rating dialog */ },
+                    onRateClick: { viewModel.toggleWatched() },
                     onShareClick: { shareContent(viewModel.uiState.meta!) },
                     onBack: onBack
                 )
@@ -225,6 +229,646 @@ struct DetailsScreen: View {
         }
         #endif
     }
+
+    private func openTrailer(for meta: NuvioMeta) {
+        Task {
+            guard let ytId = await preferredTrailerYouTubeId(for: meta) else { return }
+            let youtubeUrl = "https://www.youtube.com/watch?v=\(ytId)"
+
+            await MainActor.run {
+                onPlayClick(youtubeUrl, meta, PlaybackMarkers.trailerSubtitle, [])
+            }
+        }
+    }
+
+    private func preferredTrailerYouTubeId(for meta: NuvioMeta) async -> String? {
+        if let ytId = meta.trailerYtIds?
+            .map({ $0.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty }) {
+            return ytId
+        }
+
+        guard tmdbEnabled,
+              !tmdbApiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+              let tmdbId = meta.tmdbId else {
+            return nil
+        }
+
+        return await fetchTmdbTrailerId(tmdbId: tmdbId, type: meta.type)
+    }
+
+    private func fetchTmdbTrailerId(tmdbId: Int, type: String) async -> String? {
+        let mediaPath = type.caseInsensitiveCompare("series") == .orderedSame ? "tv" : "movie"
+        var components = URLComponents(string: "https://api.themoviedb.org/3/\(mediaPath)/\(tmdbId)/videos")
+        components?.queryItems = [
+            URLQueryItem(name: "api_key", value: tmdbApiKey),
+            URLQueryItem(name: "language", value: "en-US")
+        ]
+        guard let url = components?.url else { return nil }
+
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+                return nil
+            }
+            let decoded = try JSONDecoder().decode(TmdbVideosResponse.self, from: data)
+            return decoded.results
+                .filter { $0.site?.caseInsensitiveCompare("YouTube") == .orderedSame }
+                .sorted { lhs, rhs in
+                    if lhs.rank != rhs.rank { return lhs.rank > rhs.rank }
+                    return (lhs.publishedAt ?? "") > (rhs.publishedAt ?? "")
+                }
+                .first?
+                .key
+        } catch {
+            return nil
+        }
+    }
+}
+
+private struct TmdbVideosResponse: Decodable {
+    let results: [TmdbVideoResult]
+}
+
+private struct TmdbVideoResult: Decodable {
+    let key: String?
+    let site: String?
+    let type: String?
+    let official: Bool?
+    let publishedAt: String?
+
+    enum CodingKeys: String, CodingKey {
+        case key, site, type, official
+        case publishedAt = "published_at"
+    }
+
+    var rank: Int {
+        var value = 0
+        if type?.caseInsensitiveCompare("Trailer") == .orderedSame { value += 100 }
+        if official == true { value += 50 }
+        if type?.caseInsensitiveCompare("Teaser") == .orderedSame { value += 25 }
+        return value
+    }
+}
+
+actor YouTubeTrailerResolver {
+    private struct Client {
+        let key: String
+        let id: String
+        let version: String
+        let userAgent: String
+        let context: [String: Any]
+        let priority: Int
+    }
+
+    private struct WatchConfig {
+        let apiKey: String
+        let visitorData: String?
+        let fetchedAt: Date
+    }
+
+    private struct StreamCandidate {
+        let clientKey: String
+        let url: String
+        let height: Int
+        let score: Double
+        let hasN: Bool
+        let ext: String
+        let priority: Int
+    }
+
+    private struct HlsCandidate {
+        let manifestUrl: String
+        let selectedVariantUrl: String
+        let width: Int
+        let height: Int
+        let bandwidth: Int
+        let priority: Int
+    }
+
+    private struct TrailerBackendResponse: Decodable {
+        let url: String?
+    }
+
+    private static let defaultUserAgent =
+        "Mozilla/5.0 (AppleTV; CPU OS 17_0 like Mac OS X) AppleWebKit/605.1.15 " +
+        "(KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    private static let fallbackApiKey = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
+    private static let configTTL: TimeInterval = 3 * 60 * 60
+    private static let resolverBaseKey = "nuvio.tv.settings.playback.trailerResolverBaseURL"
+    static let minimumHeight = 1080
+
+    private static let clients: [Client] = [
+        Client(
+            key: "android_vr",
+            id: "28",
+            version: "1.56.21",
+            userAgent: "com.google.android.apps.youtube.vr.oculus/1.56.21 (Linux; U; Android 12; en_US; Quest 3; Build/SQ3A.220605.009.A1) gzip",
+            context: [
+                "clientName": "ANDROID_VR",
+                "clientVersion": "1.56.21",
+                "deviceMake": "Oculus",
+                "deviceModel": "Quest 3",
+                "osName": "Android",
+                "osVersion": "12",
+                "platform": "MOBILE",
+                "androidSdkVersion": 32,
+                "hl": "en",
+                "gl": "US"
+            ],
+            priority: 0
+        ),
+        Client(
+            key: "android",
+            id: "3",
+            version: "20.10.35",
+            userAgent: "com.google.android.youtube/20.10.35 (Linux; U; Android 14; en_US) gzip",
+            context: [
+                "clientName": "ANDROID",
+                "clientVersion": "20.10.35",
+                "osName": "Android",
+                "osVersion": "14",
+                "platform": "MOBILE",
+                "androidSdkVersion": 34,
+                "hl": "en",
+                "gl": "US"
+            ],
+            priority: 1
+        ),
+        Client(
+            key: "ios",
+            id: "5",
+            version: "20.10.1",
+            userAgent: "com.google.ios.youtube/20.10.1 (iPhone16,2; U; CPU iOS 17_4 like Mac OS X)",
+            context: [
+                "clientName": "IOS",
+                "clientVersion": "20.10.1",
+                "deviceModel": "iPhone16,2",
+                "osName": "iPhone",
+                "osVersion": "17.4.0.21E219",
+                "platform": "MOBILE",
+                "hl": "en",
+                "gl": "US"
+            ],
+            priority: 2
+        )
+    ]
+
+    private var cachedConfig: WatchConfig?
+    private let session: URLSession = {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.timeoutIntervalForRequest = 20
+        configuration.timeoutIntervalForResource = 30
+        configuration.httpAdditionalHeaders = [
+            "Accept-Language": "en-US,en;q=0.9"
+        ]
+        return URLSession(configuration: configuration)
+    }()
+
+    func resolve(youtubeVideoId: String, title: String?, year: String?) async -> TrailerPlaybackSource? {
+        guard Self.isYouTubeVideoId(youtubeVideoId) else { return nil }
+
+        if let url = await resolveWithInnertube(videoId: youtubeVideoId, forceRefreshConfig: false) {
+            return url
+        }
+
+        cachedConfig = nil
+        if let url = await resolveWithInnertube(videoId: youtubeVideoId, forceRefreshConfig: true) {
+            return url
+        }
+
+        let youtubeUrl = "https://www.youtube.com/watch?v=\(youtubeVideoId)"
+        return await resolveWithBackend(youtubeUrl: youtubeUrl, title: title, year: year)
+    }
+
+    private func resolveWithInnertube(videoId: String, forceRefreshConfig: Bool) async -> TrailerPlaybackSource? {
+        guard let config = try? await watchConfig(forceRefresh: forceRefreshConfig) else { return nil }
+        var hlsCandidates: [HlsCandidate] = []
+        var progressive: [StreamCandidate] = []
+        var adaptiveVideo: [StreamCandidate] = []
+        var adaptiveAudio: [StreamCandidate] = []
+
+        for client in Self.clients {
+            if Task.isCancelled { return nil }
+            guard let playerResponse = try? await fetchPlayerResponse(
+                apiKey: config.apiKey,
+                videoId: videoId,
+                client: client,
+                visitorData: config.visitorData
+            ) else {
+                continue
+            }
+
+            if let status = stringValue(mapValue(playerResponse, key: "playabilityStatus"), key: "status"),
+               status != "OK" {
+                continue
+            }
+
+            guard let streamingData = mapValue(playerResponse, key: "streamingData") else { continue }
+
+            if let manifestUrl = stringValue(streamingData, key: "hlsManifestUrl"),
+               let candidate = try? await hlsCandidate(manifestUrl: manifestUrl, priority: client.priority) {
+                hlsCandidates.append(candidate)
+            }
+
+            for format in listMapValue(streamingData, key: "formats") {
+                guard let url = stringValue(format, key: "url") else { continue }
+                let mimeType = stringValue(format, key: "mimeType") ?? ""
+                guard mimeType.contains("video/") else { continue }
+
+                let height = Int(numberValue(format, key: "height") ?? Double(parseQualityLabel(stringValue(format, key: "qualityLabel")) ?? 0))
+                let fps = Int(numberValue(format, key: "fps") ?? 0)
+                let bitrate = numberValue(format, key: "bitrate") ?? numberValue(format, key: "averageBitrate") ?? 0
+
+                progressive.append(
+                    StreamCandidate(
+                        clientKey: client.key,
+                        url: url,
+                        height: height,
+                        score: videoScore(height: height, fps: fps, bitrate: bitrate),
+                        hasN: hasNParam(url),
+                        ext: mimeType.contains("webm") ? "webm" : "mp4",
+                        priority: client.priority
+                    )
+                )
+            }
+
+            for format in listMapValue(streamingData, key: "adaptiveFormats") {
+                guard let url = stringValue(format, key: "url") else { continue }
+                let mimeType = stringValue(format, key: "mimeType") ?? ""
+                let hasVideo = mimeType.contains("video/")
+                let hasAudio = mimeType.contains("audio/") || mimeType.hasPrefix("audio/")
+
+                if hasVideo {
+                    let height = Int(numberValue(format, key: "height") ?? Double(parseQualityLabel(stringValue(format, key: "qualityLabel")) ?? 0))
+                    let fps = Int(numberValue(format, key: "fps") ?? 0)
+                    let bitrate = numberValue(format, key: "bitrate") ?? numberValue(format, key: "averageBitrate") ?? 0
+
+                    adaptiveVideo.append(
+                        StreamCandidate(
+                            clientKey: client.key,
+                            url: url,
+                            height: height,
+                            score: videoScore(height: height, fps: fps, bitrate: bitrate),
+                            hasN: hasNParam(url),
+                            ext: mimeType.contains("webm") ? "webm" : "mp4",
+                            priority: client.priority
+                        )
+                    )
+                } else if hasAudio {
+                    let bitrate = numberValue(format, key: "bitrate") ?? numberValue(format, key: "averageBitrate") ?? 0
+                    let sampleRate = numberValue(format, key: "audioSampleRate") ?? 0
+
+                    adaptiveAudio.append(
+                        StreamCandidate(
+                            clientKey: client.key,
+                            url: url,
+                            height: 0,
+                            score: audioScore(bitrate: bitrate, sampleRate: sampleRate),
+                            hasN: hasNParam(url),
+                            ext: mimeType.contains("webm") ? "webm" : "m4a",
+                            priority: client.priority
+                        )
+                    )
+                }
+            }
+        }
+
+        if let video = adaptiveVideo
+            .filter({ $0.height >= Self.minimumHeight })
+            .sorted(by: sortStreamCandidates)
+            .first {
+            let audio = adaptiveAudio
+                .filter { $0.clientKey == video.clientKey }
+                .sorted(by: sortStreamCandidates)
+                .first ?? adaptiveAudio.sorted(by: sortStreamCandidates).first
+            return TrailerPlaybackSource(videoUrl: video.url, audioUrl: audio?.url)
+        }
+
+        if let hls = hlsCandidates
+            .filter({ $0.height >= Self.minimumHeight })
+            .sorted(by: sortHlsCandidates)
+            .first {
+            return TrailerPlaybackSource(videoUrl: hls.selectedVariantUrl, audioUrl: nil)
+        }
+
+        let progressiveUrl = progressive
+            .filter { $0.height >= Self.minimumHeight }
+            .sorted(by: sortStreamCandidates)
+            .first?.url
+        guard let progressiveUrl else { return nil }
+        return TrailerPlaybackSource(videoUrl: progressiveUrl, audioUrl: nil)
+    }
+
+    private func watchConfig(forceRefresh: Bool) async throws -> WatchConfig {
+        if !forceRefresh,
+           let cachedConfig,
+           Date().timeIntervalSince(cachedConfig.fetchedAt) < Self.configTTL {
+            return cachedConfig
+        }
+
+        guard let url = URL(string: "https://www.youtube.com/watch?v=dQw4w9WgXcQ&hl=en") else {
+            throw URLError(.badURL)
+        }
+
+        var request = URLRequest(url: url)
+        addDefaultHeaders(to: &request)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+
+        let html = String(data: data, encoding: .utf8) ?? ""
+        let config = WatchConfig(
+            apiKey: firstCapture(in: html, pattern: #""INNERTUBE_API_KEY":"([^"]+)""#) ?? Self.fallbackApiKey,
+            visitorData: firstCapture(in: html, pattern: #""VISITOR_DATA":"([^"]+)""#),
+            fetchedAt: Date()
+        )
+        cachedConfig = config
+        return config
+    }
+
+    private func fetchPlayerResponse(
+        apiKey: String,
+        videoId: String,
+        client: Client,
+        visitorData: String?
+    ) async throws -> [String: Any] {
+        let encodedKey = apiKey.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? apiKey
+        guard let url = URL(string: "https://www.youtube.com/youtubei/v1/player?key=\(encodedKey)") else {
+            throw URLError(.badURL)
+        }
+
+        let payload: [String: Any] = [
+            "videoId": videoId,
+            "contentCheckOk": true,
+            "racyCheckOk": true,
+            "context": ["client": client.context],
+            "playbackContext": [
+                "contentPlaybackContext": ["html5Preference": "HTML5_PREF_WANTS"]
+            ]
+        ]
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+        addDefaultHeaders(to: &request)
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("https://www.youtube.com", forHTTPHeaderField: "Origin")
+        request.setValue(client.id, forHTTPHeaderField: "X-YouTube-Client-Name")
+        request.setValue(client.version, forHTTPHeaderField: "X-YouTube-Client-Version")
+        request.setValue(client.userAgent, forHTTPHeaderField: "User-Agent")
+        if let visitorData, !visitorData.isEmpty {
+            request.setValue(visitorData, forHTTPHeaderField: "X-Goog-Visitor-Id")
+        }
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+
+        return (try JSONSerialization.jsonObject(with: data) as? [String: Any]) ?? [:]
+    }
+
+    private func hlsCandidate(manifestUrl: String, priority: Int) async throws -> HlsCandidate {
+        guard let url = URL(string: manifestUrl) else { throw URLError(.badURL) }
+        var request = URLRequest(url: url)
+        addDefaultHeaders(to: &request)
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            throw URLError(.badServerResponse)
+        }
+
+        let text = String(data: data, encoding: .utf8) ?? ""
+        let lines = text
+            .split(whereSeparator: \.isNewline)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        var best = HlsCandidate(
+            manifestUrl: manifestUrl,
+            selectedVariantUrl: manifestUrl,
+            width: 0,
+            height: 0,
+            bandwidth: 0,
+            priority: priority
+        )
+        for index in lines.indices {
+            let line = lines[index]
+            guard line.hasPrefix("#EXT-X-STREAM-INF:"),
+                  index + 1 < lines.count,
+                  !lines[index + 1].hasPrefix("#") else {
+                continue
+            }
+
+            let attrs = parseHlsAttributeList(line)
+            let (width, height) = parseResolution(attrs["RESOLUTION"] ?? "")
+            let bandwidth = Int(attrs["BANDWIDTH"] ?? "") ?? 0
+            let variantUrl = absolutizeUrl(baseUrl: manifestUrl, maybeRelative: lines[index + 1])
+
+            if height > best.height ||
+                (height == best.height && bandwidth > best.bandwidth) ||
+                (height == best.height && bandwidth == best.bandwidth && width > best.width) {
+                best = HlsCandidate(
+                    manifestUrl: manifestUrl,
+                    selectedVariantUrl: variantUrl,
+                    width: width,
+                    height: height,
+                    bandwidth: bandwidth,
+                    priority: priority
+                )
+            }
+        }
+
+        return best
+    }
+
+    private func resolveWithBackend(youtubeUrl: String, title: String?, year: String?) async -> TrailerPlaybackSource? {
+        guard let baseUrl = configuredBackendBaseURL() else { return nil }
+        let endpoint = baseUrl.lastPathComponent == "trailer" ? baseUrl : baseUrl.appendingPathComponent("trailer")
+        guard var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false) else { return nil }
+
+        components.queryItems = [
+            URLQueryItem(name: "youtube_url", value: youtubeUrl),
+            URLQueryItem(name: "title", value: title),
+            URLQueryItem(name: "year", value: year)
+        ].filter { $0.value != nil }
+
+        guard let url = components.url else { return nil }
+
+        do {
+            var request = URLRequest(url: url)
+            addDefaultHeaders(to: &request)
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+                return nil
+            }
+            let decoded = try JSONDecoder().decode(TrailerBackendResponse.self, from: data)
+            guard let resolved = decoded.url,
+                  resolved.hasPrefix("http://") || resolved.hasPrefix("https://") else {
+                return nil
+            }
+            return TrailerPlaybackSource(videoUrl: resolved, audioUrl: nil)
+        } catch {
+            return nil
+        }
+    }
+
+    private func configuredBackendBaseURL() -> URL? {
+        let candidates = [
+            UserDefaults.standard.string(forKey: Self.resolverBaseKey),
+            Bundle.main.object(forInfoDictionaryKey: "NuvioTrailerAPIBaseURL") as? String
+        ]
+
+        return candidates
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .first(where: { !$0.isEmpty })
+            .flatMap(URL.init(string:))
+    }
+
+    private func addDefaultHeaders(to request: inout URLRequest) {
+        request.setValue("en-US,en;q=0.9", forHTTPHeaderField: "Accept-Language")
+        request.setValue(Self.defaultUserAgent, forHTTPHeaderField: "User-Agent")
+    }
+
+    private func sortHlsCandidates(_ lhs: HlsCandidate, _ rhs: HlsCandidate) -> Bool {
+        if lhs.height != rhs.height { return lhs.height > rhs.height }
+        if lhs.bandwidth != rhs.bandwidth { return lhs.bandwidth > rhs.bandwidth }
+        return lhs.priority < rhs.priority
+    }
+
+    private func sortStreamCandidates(_ lhs: StreamCandidate, _ rhs: StreamCandidate) -> Bool {
+        if lhs.score != rhs.score { return lhs.score > rhs.score }
+        if lhs.hasN != rhs.hasN { return !lhs.hasN }
+        if containerPreference(lhs.ext) != containerPreference(rhs.ext) {
+            return containerPreference(lhs.ext) < containerPreference(rhs.ext)
+        }
+        return lhs.priority < rhs.priority
+    }
+
+    private func videoScore(height: Int, fps: Int, bitrate: Double) -> Double {
+        Double(height) * 1_000_000_000 + Double(fps) * 1_000_000 + bitrate
+    }
+
+    private func audioScore(bitrate: Double, sampleRate: Double) -> Double {
+        bitrate * 1_000_000 + sampleRate
+    }
+
+    private func containerPreference(_ ext: String) -> Int {
+        switch ext.lowercased() {
+        case "mp4", "m4a": return 0
+        case "webm": return 1
+        default: return 2
+        }
+    }
+
+    private func parseQualityLabel(_ label: String?) -> Int? {
+        guard let label else { return nil }
+        return firstCapture(in: label, pattern: #"\b(\d{2,4})p\b"#).flatMap(Int.init)
+    }
+
+    private func hasNParam(_ url: String) -> Bool {
+        URLComponents(string: url)?.queryItems?.contains { $0.name == "n" && !($0.value ?? "").isEmpty } ?? false
+    }
+
+    private func parseHlsAttributeList(_ line: String) -> [String: String] {
+        guard let colon = line.firstIndex(of: ":") else { return [:] }
+        let raw = line[line.index(after: colon)...]
+        var output: [String: String] = [:]
+        var key = ""
+        var value = ""
+        var inKey = true
+        var inQuote = false
+
+        for char in raw {
+            if inKey {
+                if char == "=" {
+                    inKey = false
+                } else {
+                    key.append(char)
+                }
+                continue
+            }
+
+            if char == "\"" {
+                inQuote.toggle()
+                continue
+            }
+
+            if char == "," && !inQuote {
+                let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmedKey.isEmpty {
+                    output[trimmedKey] = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                }
+                key = ""
+                value = ""
+                inKey = true
+                continue
+            }
+
+            value.append(char)
+        }
+
+        let trimmedKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmedKey.isEmpty {
+            output[trimmedKey] = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return output
+    }
+
+    private func parseResolution(_ raw: String) -> (Int, Int) {
+        let parts = raw.split(separator: "x", maxSplits: 1)
+        guard parts.count == 2 else { return (0, 0) }
+        return (Int(parts[0]) ?? 0, Int(parts[1]) ?? 0)
+    }
+
+    private func absolutizeUrl(baseUrl: String, maybeRelative: String) -> String {
+        guard let base = URL(string: baseUrl),
+              let resolved = URL(string: maybeRelative, relativeTo: base)?.absoluteURL else {
+            return maybeRelative
+        }
+        return resolved.absoluteString
+    }
+
+    private func mapValue(_ dictionary: [String: Any]?, key: String) -> [String: Any]? {
+        dictionary?[key] as? [String: Any]
+    }
+
+    private func listMapValue(_ dictionary: [String: Any], key: String) -> [[String: Any]] {
+        (dictionary[key] as? [Any])?.compactMap { $0 as? [String: Any] } ?? []
+    }
+
+    private func stringValue(_ dictionary: [String: Any]?, key: String) -> String? {
+        guard let value = dictionary?[key] else { return nil }
+        if let string = value as? String { return string }
+        if let number = value as? NSNumber { return number.stringValue }
+        return nil
+    }
+
+    private func numberValue(_ dictionary: [String: Any], key: String) -> Double? {
+        if let number = dictionary[key] as? NSNumber { return number.doubleValue }
+        if let string = dictionary[key] as? String { return Double(string) }
+        return nil
+    }
+
+    private func firstCapture(in text: String, pattern: String) -> String? {
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return nil }
+        let range = NSRange(text.startIndex..<text.endIndex, in: text)
+        guard let match = regex.firstMatch(in: text, range: range),
+              match.numberOfRanges > 1,
+              let captureRange = Range(match.range(at: 1), in: text) else {
+            return nil
+        }
+        return String(text[captureRange])
+    }
+
+    private static func isYouTubeVideoId(_ value: String) -> Bool {
+        value.count == 11 && value.allSatisfy { char in
+            char.isLetter || char.isNumber || char == "_" || char == "-"
+        }
+    }
 }
 
 private enum SmartPlaybackSelector {
@@ -351,6 +995,7 @@ struct TvDetailsContent: View {
     let onWatchlistClick: () -> Void
     let onRateClick: () -> Void
     let onShareClick: () -> Void
+    let onTrailerClick: () -> Void
     let onBack: () -> Void
 
     var body: some View {
@@ -370,6 +1015,7 @@ struct TvDetailsContent: View {
 
                                 TvDetailsActionRow(
                                     isInWatchlist: uiState.isInWatchlist,
+                                    isWatched: uiState.isWatched,
                                     playTitle: playTitle(firstEpisode),
                                     onPlayClick: {
                                         // For a series the primary button plays the first
@@ -382,7 +1028,7 @@ struct TvDetailsContent: View {
                                     },
                                     onWatchlistClick: onWatchlistClick,
                                     onRateClick: onRateClick,
-                                    onTrailerClick: onShareClick
+                                    onTrailerClick: onTrailerClick
                                 )
                                 .padding(.bottom, 6)
 
@@ -405,7 +1051,7 @@ struct TvDetailsContent: View {
 
                                 TvDetailsCastAndTrailer(
                                     meta: meta,
-                                    onTrailerClick: onShareClick,
+                                    onTrailerClick: onTrailerClick,
                                     onFocus: {
                                         withAnimation(.easeOut(duration: 0.24)) {
                                             scrollProxy.scrollTo(TvDetailsScrollID.castSection, anchor: .top)
@@ -547,6 +1193,7 @@ private struct TvDetailsLogo: View {
 
 private struct TvDetailsActionRow: View {
     let isInWatchlist: Bool
+    let isWatched: Bool
     var playTitle: String = "Play"
     let onPlayClick: () -> Void
     let onWatchlistClick: () -> Void
@@ -571,7 +1218,7 @@ private struct TvDetailsActionRow: View {
 
             TvDetailsActionButton(
                 title: nil,
-                systemName: "eye.slash.fill",
+                systemName: isWatched ? "eye.fill" : "eye.slash.fill",
                 isPrimary: false,
                 action: onRateClick
             )

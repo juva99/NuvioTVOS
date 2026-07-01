@@ -49,6 +49,8 @@ class PlayerViewModel: ObservableObject {
     /// Used to recognize an expired-link "slate" the stream host plays in place
     /// of the movie — see `loadedStreamLooksLikeReplacement()`.
     private var expectedDurationSeconds: Double?
+    private let trailerResolver = YouTubeTrailerResolver()
+    private var trailerResolveTask: Task<Void, Never>?
     private var didDetectReplacementStream = false
     private var replacementStreamHits = 0
     private static let replacementConfirmTicks = 4   // ~1s at the 0.25s poll cadence
@@ -57,6 +59,7 @@ class PlayerViewModel: ObservableObject {
         let controller = playerController
         let poll = pollTimer
         let hide = controlsHideTimer
+        trailerResolveTask?.cancel()
         Task { @MainActor in
             poll?.invalidate()
             hide?.invalidate()
@@ -65,13 +68,14 @@ class PlayerViewModel: ObservableObject {
     }
 
     func load(url: URL, meta: NuvioMeta, subtitle: String, externalSubtitles: [NuvioSubtitle] = [], resumeFrom: Double?) {
+        let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
         self.title = meta.name
         self.subtitle = subtitle
         self.status = .buffering
         self.activeMeta = meta
         self.activeStreamURL = url.absoluteString
-        self.pendingResumeSeconds = resumeFrom
-        self.expectedDurationSeconds = Self.expectedDuration(for: meta)
+        self.pendingResumeSeconds = isTrailerPlayback ? nil : resumeFrom
+        self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
         self.didDetectReplacementStream = false
         self.replacementStreamHits = 0
         self.pendingExternalSubtitles = externalSubtitles
@@ -79,6 +83,38 @@ class PlayerViewModel: ObservableObject {
         self.didApplySubtitlePreference = false
         guard !hasLoaded else { return }
         hasLoaded = true
+
+        if isTrailerPlayback, let youtubeId = Self.youtubeVideoId(from: url) {
+            let title = meta.name
+            let year = meta.year.map(String.init)
+            let resolver = trailerResolver
+
+            trailerResolveTask?.cancel()
+            trailerResolveTask = Task { [weak self] in
+                let resolvedUrl = await resolver.resolve(
+                    youtubeVideoId: youtubeId,
+                    title: title,
+                    year: year
+                )
+
+                guard !Task.isCancelled else { return }
+
+                await MainActor.run {
+                    guard let self else { return }
+                    guard let playbackSource = resolvedUrl else {
+                        self.status = .error("No 1080p trailer stream was found for this title.")
+                        return
+                    }
+                    self.activeStreamURL = playbackSource.videoUrl
+                    self.playerController.loadFile(playbackSource.videoUrl)
+                    if let audioUrl = playbackSource.audioUrl {
+                        self.playerController.addAudioUrl(audioUrl)
+                    }
+                    self.startPolling()
+                }
+            }
+            return
+        }
 
         playerController.loadFile(url.absoluteString)
         startPolling()
@@ -108,14 +144,15 @@ class PlayerViewModel: ObservableObject {
         // (e.g. ElfHosted's "Link expired" video) that decodes cleanly, so it
         // never trips the mpv-error guard. Bail before any Continue Watching
         // write/clear so it can't overwrite or delete the real resume point.
-        if detectReplacementStream(c) { return }
+        if subtitle != PlaybackMarkers.trailerSubtitle, detectReplacementStream(c) { return }
 
         applyPendingResumeIfNeeded()
         addPendingExternalSubtitlesIfNeeded()
 
         if c.isPlayerEnded {
-            if let activeMeta {
+            if let activeMeta, subtitle != PlaybackMarkers.trailerSubtitle {
                 ContinueWatchingStore.remove(metaId: activeMeta.id)
+                WatchedStore.markWatched(activeMeta)
             }
         } else {
             saveProgressIfNeeded()
@@ -326,6 +363,7 @@ class PlayerViewModel: ObservableObject {
         guard let activeMeta,
               let activeStreamURL,
               time.duration > 0,
+              subtitle != PlaybackMarkers.trailerSubtitle,
               !loadedStreamLooksLikeReplacement(),
               force || time.current >= 10 else {
             return
@@ -420,6 +458,42 @@ class PlayerViewModel: ObservableObject {
         guard let totalMinutes, totalMinutes > 0 else { return nil }
         return Double(totalMinutes) * 60
     }
+
+    private static func youtubeVideoId(from url: URL) -> String? {
+        let host = (url.host ?? "").lowercased().replacingOccurrences(of: "www.", with: "")
+
+        if host == "youtu.be" {
+            let id = url.pathComponents.dropFirst().first ?? ""
+            return isYouTubeVideoId(id) ? id : nil
+        }
+
+        guard host == "youtube.com" || host.hasSuffix(".youtube.com") else {
+            return nil
+        }
+
+        if let id = URLComponents(url: url, resolvingAgainstBaseURL: false)?
+            .queryItems?
+            .first(where: { $0.name == "v" })?
+            .value,
+           isYouTubeVideoId(id) {
+            return id
+        }
+
+        let components = url.pathComponents.filter { $0 != "/" }
+        guard components.count >= 2,
+              ["embed", "shorts", "live"].contains(components[0]),
+              isYouTubeVideoId(components[1]) else {
+            return nil
+        }
+
+        return components[1]
+    }
+
+    private static func isYouTubeVideoId(_ value: String) -> Bool {
+        value.count == 11 && value.allSatisfy { char in
+            char.isLetter || char.isNumber || char == "_" || char == "-"
+        }
+    }
 }
 
 // MARK: - Track Info
@@ -447,6 +521,7 @@ final class MPVPlayerViewController: UIViewController {
     private var metalLayer = MPVMetalLayer()
     private var lastAppliedDrawableSize: CGSize = .zero
     private var pendingURL: String?
+    private var pendingAudioURL: String?
     private var mpv: OpaquePointer?
     private lazy var eventQueue = DispatchQueue(label: "mpv-events", qos: .userInitiated)
     private var recentPlaybackLogs: [String] = []
@@ -668,6 +743,18 @@ final class MPVPlayerViewController: UIViewController {
         command("sub-add", args: [url, "select"])
     }
 
+    func addAudioUrl(_ url: String) {
+        pendingAudioURL = url
+        guard mpv != nil, !isPlayerLoading else { return }
+        attachPendingAudioIfNeeded()
+    }
+
+    private func attachPendingAudioIfNeeded() {
+        guard let url = pendingAudioURL else { return }
+        pendingAudioURL = nil
+        command("audio-add", args: [url, "select"])
+    }
+
     /// Pushes the user's saved subtitle appearance (Settings → Subtitle Style)
     /// into libmpv. Safe to call repeatedly — invoked once after init and again
     /// on every FILE_LOADED so the styling lands on each track that gets parsed.
@@ -835,6 +922,7 @@ final class MPVPlayerViewController: UIViewController {
                     DispatchQueue.main.async {
                         self.clearPlaybackError()
                         self.isPlayerLoading = false
+                        self.attachPendingAudioIfNeeded()
                         self.applySubtitleStyle()
                         self.updateState()
                     }

@@ -188,7 +188,7 @@ struct SearchView: View {
     }
 
     private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 200, maximum: 220), spacing: 36, alignment: .top)]
+        [GridItem(.adaptive(minimum: 210, maximum: 230), spacing: 36, alignment: .top)]
     }
 
     // MARK: Recent searches (shown above Discover when idle)
@@ -277,7 +277,7 @@ private struct SearchResultCard: View {
                         }
                     }
                 }
-                .frame(width: 200, height: 300)
+                .frame(width: 210, height: 315)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(
                     RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -296,7 +296,7 @@ private struct SearchResultCard: View {
                             .foregroundColor(.white.opacity(0.45))
                             .lineLimit(1)
                     }
-                    .frame(width: 200, alignment: .leading)
+                    .frame(width: 210, alignment: .leading)
                 }
             }
             .scaleEffect(focused ? 1.06 : 1.0)

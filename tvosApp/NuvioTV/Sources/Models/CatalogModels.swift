@@ -62,6 +62,8 @@ struct NuvioMeta: Identifiable, Codable {
     let status: String?
     /// Series episodes (Stremio `videos`). nil/empty for movies.
     let videos: [NuvioVideo]?
+    /// YouTube trailer ids from Cinemeta `trailers` / `trailerStreams`.
+    let trailerYtIds: [String]?
 
     var isSeries: Bool { type == "series" }
 
@@ -87,7 +89,8 @@ struct NuvioMeta: Identifiable, Codable {
         country: String?,
         released: String?,
         status: String? = nil,
-        videos: [NuvioVideo]? = nil
+        videos: [NuvioVideo]? = nil,
+        trailerYtIds: [String]? = nil
     ) {
         self.id = id
         self.name = name
@@ -111,6 +114,7 @@ struct NuvioMeta: Identifiable, Codable {
         self.released = released
         self.status = status
         self.videos = videos
+        self.trailerYtIds = trailerYtIds
     }
 }
 
@@ -155,6 +159,15 @@ struct NuvioStream: Identifiable, Codable {
         self.addonName = addonName
         self.subtitles = subtitles
     }
+}
+
+enum PlaybackMarkers {
+    static let trailerSubtitle = "Trailer"
+}
+
+struct TrailerPlaybackSource {
+    let videoUrl: String
+    let audioUrl: String?
 }
 
 struct ContinueWatchingItem: Identifiable, Codable {
@@ -270,6 +283,158 @@ enum ContinueWatchingStore {
               let legacyData = defaults.data(forKey: baseKey) else { return }
         defaults.set(legacyData, forKey: profileKey)
         defaults.removeObject(forKey: baseKey)
+    }
+}
+
+struct LibraryStoreItem: Identifiable, Codable {
+    var id: String { meta.id }
+    let meta: NuvioMeta
+    let addedAt: Date
+
+    var stremioMeta: StremioMeta {
+        StremioMeta(
+            id: meta.id,
+            name: meta.name,
+            contentType: meta.type,
+            poster: meta.posterUrl,
+            background: meta.backgroundUrl,
+            logo: meta.logoUrl,
+            description: meta.description,
+            releaseInfo: meta.releaseInfo ?? meta.year.map(String.init),
+            imdbRating: meta.rating.map { String(format: "%.1f", $0) },
+            year: meta.year.map(Int32.init),
+            genres: meta.genres,
+            runtime: meta.runtime
+        )
+    }
+}
+
+enum LibraryStore {
+    static let changedNotification = Notification.Name("nuvio.tv.library.changed")
+
+    private static let baseKey = "nuvio.tv.library.items"
+    private(set) static var activeProfileId: String?
+
+    static func setActiveProfile(_ profileId: String?) {
+        activeProfileId = profileId
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    private static var storageKey: String {
+        guard let id = activeProfileId, !id.isEmpty else { return baseKey }
+        return "\(baseKey).\(id)"
+    }
+
+    static func items() -> [LibraryStoreItem] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([LibraryStoreItem].self, from: data) else {
+            return []
+        }
+
+        return decoded.sorted { $0.addedAt > $1.addedAt }
+    }
+
+    static func contains(metaId: String, type: String) -> Bool {
+        items().contains { $0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame }
+    }
+
+    @discardableResult
+    static func toggle(meta: NuvioMeta) -> Bool {
+        if contains(metaId: meta.id, type: meta.type) {
+            remove(metaId: meta.id, type: meta.type)
+            return false
+        }
+
+        add(meta)
+        return true
+    }
+
+    static func add(_ meta: NuvioMeta) {
+        let item = LibraryStoreItem(meta: meta, addedAt: Date())
+        let updated = [item] + items().filter {
+            !($0.meta.id == meta.id && $0.meta.type.caseInsensitiveCompare(meta.type) == .orderedSame)
+        }
+        persist(updated)
+    }
+
+    static func remove(metaId: String, type: String) {
+        persist(items().filter {
+            !($0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame)
+        })
+    }
+
+    private static func persist(_ items: [LibraryStoreItem]) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+}
+
+struct WatchedStoreItem: Identifiable, Codable {
+    var id: String { "\(meta.type):\(meta.id)" }
+    let meta: NuvioMeta
+    let watchedAt: Date
+}
+
+enum WatchedStore {
+    static let changedNotification = Notification.Name("nuvio.tv.watched.changed")
+
+    private static let baseKey = "nuvio.tv.watched.items"
+    private(set) static var activeProfileId: String?
+
+    static func setActiveProfile(_ profileId: String?) {
+        activeProfileId = profileId
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    private static var storageKey: String {
+        guard let id = activeProfileId, !id.isEmpty else { return baseKey }
+        return "\(baseKey).\(id)"
+    }
+
+    static func items() -> [WatchedStoreItem] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([WatchedStoreItem].self, from: data) else {
+            return []
+        }
+
+        return decoded.sorted { $0.watchedAt > $1.watchedAt }
+    }
+
+    static func contains(metaId: String, type: String) -> Bool {
+        items().contains { $0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame }
+    }
+
+    @discardableResult
+    static func toggle(meta: NuvioMeta) -> Bool {
+        if contains(metaId: meta.id, type: meta.type) {
+            remove(metaId: meta.id, type: meta.type)
+            return false
+        }
+
+        markWatched(meta)
+        return true
+    }
+
+    static func markWatched(_ meta: NuvioMeta) {
+        ContinueWatchingStore.remove(metaId: meta.id)
+        let item = WatchedStoreItem(meta: meta, watchedAt: Date())
+        let updated = [item] + items().filter {
+            !($0.meta.id == meta.id && $0.meta.type.caseInsensitiveCompare(meta.type) == .orderedSame)
+        }
+        persist(updated)
+    }
+
+    static func remove(metaId: String, type: String) {
+        persist(items().filter {
+            !($0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame)
+        })
+    }
+
+    private static func persist(_ items: [WatchedStoreItem]) {
+        guard let data = try? JSONEncoder().encode(items) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+        NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 }
 
@@ -414,5 +579,6 @@ struct DetailsUiState {
     var isLoadingStreams: Bool = false
     var error: String? = nil
     var isInWatchlist: Bool = false
+    var isWatched: Bool = false
     var userRating: Int? = nil
 }

@@ -121,13 +121,14 @@ struct ContentView: View {
                     repository: CinemetaCatalogRepository(),
                     onPlayClick: { streamUrlString, meta, subtitle, externalSubtitles in
                         if let url = URL(string: streamUrlString) {
+                            let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
                             withAnimation(.easeInOut(duration: 0.28)) {
                                 activeScreen = .player(
                                     url: url,
                                     meta: meta,
                                     subtitle: subtitle,
                                     externalSubtitles: externalSubtitles,
-                                    resumeFrom: ContinueWatchingStore.item(for: meta.id)?.resumePosition
+                                    resumeFrom: isTrailer ? nil : ContinueWatchingStore.item(for: meta.id)?.resumePosition
                                 )
                             }
                         }

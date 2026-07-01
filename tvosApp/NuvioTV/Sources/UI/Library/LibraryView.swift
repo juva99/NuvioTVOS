@@ -78,7 +78,7 @@ public struct LibraryView: View {
     }
 
     private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 200, maximum: 220), spacing: 36, alignment: .top)]
+        [GridItem(.adaptive(minimum: 230, maximum: 250), spacing: 28, alignment: .top)]
     }
 }
 
@@ -110,10 +110,10 @@ struct LibraryItemButton: View {
                         }
                     }
                 }
-                .frame(width: 150, height: 225)
-                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .frame(width: 210, height: 315)
+                .clipShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
                 .overlay(
-                    RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
                         .stroke(isFocused ? focusBorderColor : Color.clear, lineWidth: focusHighlighter ? 5 : 3)
                 )
                 .shadow(color: .black.opacity(isFocused ? 0.5 : 0.2), radius: isFocused ? 12 : 4)
@@ -125,17 +125,25 @@ struct LibraryItemButton: View {
                         .font(.system(size: 18, weight: isFocused ? .semibold : .medium))
                         .foregroundColor(isFocused ? .white : .white.opacity(0.6))
                         .lineLimit(1)
-                        .frame(width: 150, alignment: .leading)
+                        .frame(width: 210, alignment: .leading)
                         .animation(smoothFocus ? .spring(response: 0.28, dampingFraction: 0.72) : nil, value: isFocused)
                 }
             }
+            .frame(width: 210, alignment: .topLeading)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 14)
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
+        .zIndex(isFocused ? 1 : 0)
     }
 
     private var focusBorderColor: Color {
         .white.opacity(0.86)
+    }
+
+    private var cardCornerRadius: CGFloat {
+        16
     }
 }

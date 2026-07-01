@@ -26,6 +26,8 @@ class DetailsViewModel: ObservableObject {
             do {
                 let meta = try await repository.getMetadata(id: id, type: type)
                 uiState.meta = meta
+                uiState.isInWatchlist = LibraryStore.contains(metaId: meta.id, type: meta.type)
+                uiState.isWatched = WatchedStore.contains(metaId: meta.id, type: meta.type)
                 uiState.isLoading = false
 
                 // Movies stream off the title id; series stream per episode, loaded
@@ -59,10 +61,13 @@ class DetailsViewModel: ObservableObject {
     }
 
     func toggleWatchlist() {
-        uiState.isInWatchlist.toggle()
-        // TODO: Persist to ProfileRepository via profile preferences
-        // The Rust SDK ProfileManager stores preferences in Profile.preferences
-        // Need to update profile with watchlist items in preferences field
+        guard let meta = uiState.meta else { return }
+        uiState.isInWatchlist = LibraryStore.toggle(meta: meta)
+    }
+
+    func toggleWatched() {
+        guard let meta = uiState.meta else { return }
+        uiState.isWatched = WatchedStore.toggle(meta: meta)
     }
 
     func rateContent(rating: Int) {

@@ -235,6 +235,8 @@ public class ProfileViewModel: ObservableObject {
             let profile = profiles.first
             // Scope watch history and settings to this profile before the UI reads them.
             ContinueWatchingStore.setActiveProfile(profile?.id)
+            LibraryStore.setActiveProfile(profile?.id)
+            WatchedStore.setActiveProfile(profile?.id)
             ProfileSettings.setActiveProfile(profile?.id)
             self.activeProfile = profile
             return
@@ -243,6 +245,8 @@ public class ProfileViewModel: ObservableObject {
             let profile = try manager.getActiveProfile()
             // Scope watch history and settings to this profile before the UI reads them.
             ContinueWatchingStore.setActiveProfile(profile?.id)
+            LibraryStore.setActiveProfile(profile?.id)
+            WatchedStore.setActiveProfile(profile?.id)
             ProfileSettings.setActiveProfile(profile?.id)
             self.activeProfile = profile
         } catch {
