@@ -1,5 +1,15 @@
 import SwiftUI
 
+private enum LibraryGridMetrics {
+    static let posterWidth: CGFloat = 210
+    static let posterHeight: CGFloat = 315
+    static let posterGap: CGFloat = 28
+    static let cardHorizontalPadding: CGFloat = 10
+    static let cardVerticalPadding: CGFloat = 14
+    static let columnWidth: CGFloat = posterWidth + cardHorizontalPadding * 2
+    static let columnSpacing: CGFloat = posterGap - cardHorizontalPadding * 2
+}
+
 public struct LibraryView: View {
     @StateObject private var viewModel: LibraryViewModel
     let onContentClick: (String, String) -> Void
@@ -49,7 +59,7 @@ public struct LibraryView: View {
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
 
-                            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 44) {
+                            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: LibraryGridMetrics.posterGap) {
                                 ForEach(viewModel.sortedAndGroupedItems[group] ?? [], id: \.id) { item in
                                     LibraryItemButton(item: item) {
                                         onContentClick(item.id, item.contentType)
@@ -78,7 +88,11 @@ public struct LibraryView: View {
     }
 
     private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 230, maximum: 250), spacing: 28, alignment: .top)]
+        [GridItem(
+            .adaptive(minimum: LibraryGridMetrics.columnWidth, maximum: LibraryGridMetrics.columnWidth),
+            spacing: LibraryGridMetrics.columnSpacing,
+            alignment: .top
+        )]
     }
 }
 
@@ -110,7 +124,7 @@ struct LibraryItemButton: View {
                         }
                     }
                 }
-                .frame(width: 210, height: 315)
+                .frame(width: LibraryGridMetrics.posterWidth, height: LibraryGridMetrics.posterHeight)
                 .clipShape(RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous))
                 .overlay(alignment: .topTrailing) {
                     WatchedCheckmarkBadge(metaId: item.id, type: item.contentType)
@@ -128,13 +142,13 @@ struct LibraryItemButton: View {
                         .font(.system(size: 18, weight: isFocused ? .semibold : .medium))
                         .foregroundColor(isFocused ? .white : .white.opacity(0.6))
                         .lineLimit(1)
-                        .frame(width: 210, alignment: .leading)
+                        .frame(width: LibraryGridMetrics.posterWidth, alignment: .leading)
                         .animation(smoothFocus ? .spring(response: 0.28, dampingFraction: 0.72) : nil, value: isFocused)
                 }
             }
-            .frame(width: 210, alignment: .topLeading)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 14)
+            .frame(width: LibraryGridMetrics.posterWidth, alignment: .topLeading)
+            .padding(.horizontal, LibraryGridMetrics.cardHorizontalPadding)
+            .padding(.vertical, LibraryGridMetrics.cardVerticalPadding)
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)

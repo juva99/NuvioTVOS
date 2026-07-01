@@ -1,5 +1,11 @@
 import SwiftUI
 
+private enum DiscoverGridMetrics {
+    static let posterWidth: CGFloat = 210
+    static let posterHeight: CGFloat = 315
+    static let posterGap: CGFloat = 28
+}
+
 /// Embeddable Discover section — a filterable poster grid (type / sort / genre)
 /// backed by Cinemeta. Hosted inside the Search tab below the search bar.
 /// The host provides the outer title, padding and background.
@@ -79,7 +85,7 @@ struct DiscoverSection: View {
 
     private var grid: some View {
         ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 44) {
+            LazyVGrid(columns: columns, alignment: .leading, spacing: DiscoverGridMetrics.posterGap) {
                 ForEach(viewModel.items) { item in
                     DiscoverCard(meta: item) {
                         onContentClick(item.id, item.type)
@@ -102,7 +108,11 @@ struct DiscoverSection: View {
     }
 
     private var columns: [GridItem] {
-        [GridItem(.adaptive(minimum: 210, maximum: 230), spacing: 36, alignment: .top)]
+        [GridItem(
+            .adaptive(minimum: DiscoverGridMetrics.posterWidth, maximum: DiscoverGridMetrics.posterWidth),
+            spacing: DiscoverGridMetrics.posterGap,
+            alignment: .top
+        )]
     }
 
     private func centered<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
@@ -199,7 +209,7 @@ private struct DiscoverCard: View {
                             }
                         }
                     }
-                    .frame(width: 210, height: 315)
+                    .frame(width: DiscoverGridMetrics.posterWidth, height: DiscoverGridMetrics.posterHeight)
 
                     if metaLine != nil {
                         LinearGradient(
@@ -221,7 +231,7 @@ private struct DiscoverCard: View {
                         }
                     }
                 }
-                .frame(width: 210, height: 315)
+                .frame(width: DiscoverGridMetrics.posterWidth, height: DiscoverGridMetrics.posterHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(alignment: .topTrailing) {
                     WatchedCheckmarkBadge(metaId: meta.id, type: meta.type)
@@ -244,7 +254,7 @@ private struct DiscoverCard: View {
                                 .foregroundColor(.white.opacity(0.45))
                         }
                     }
-                    .frame(width: 210, alignment: .leading)
+                    .frame(width: DiscoverGridMetrics.posterWidth, alignment: .leading)
                 }
             }
             .scaleEffect(focused ? 1.06 : 1.0)

@@ -1,6 +1,12 @@
 import SwiftUI
 import UIKit
 
+private enum SearchGridMetrics {
+    static let posterWidth: CGFloat = 210
+    static let posterHeight: CGFloat = 315
+    static let posterGap: CGFloat = 28
+}
+
 struct SearchView: View {
     @StateObject private var viewModel: SearchViewModel
     let showDiscover: Bool
@@ -171,7 +177,7 @@ struct SearchView: View {
 
     private var resultsGrid: some View {
         ScrollView {
-            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: 44) {
+            LazyVGrid(columns: gridColumns, alignment: .leading, spacing: SearchGridMetrics.posterGap) {
                 ForEach(viewModel.results) { item in
                     SearchResultCard(meta: item, externalFocus: $focusedResultID) {
                         onContentClick(item.id, item.type)
@@ -188,7 +194,11 @@ struct SearchView: View {
     }
 
     private var gridColumns: [GridItem] {
-        [GridItem(.adaptive(minimum: 210, maximum: 230), spacing: 36, alignment: .top)]
+        [GridItem(
+            .adaptive(minimum: SearchGridMetrics.posterWidth, maximum: SearchGridMetrics.posterWidth),
+            spacing: SearchGridMetrics.posterGap,
+            alignment: .top
+        )]
     }
 
     // MARK: Recent searches (shown above Discover when idle)
@@ -277,7 +287,7 @@ private struct SearchResultCard: View {
                         }
                     }
                 }
-                .frame(width: 210, height: 315)
+                .frame(width: SearchGridMetrics.posterWidth, height: SearchGridMetrics.posterHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
                 .overlay(alignment: .topTrailing) {
                     WatchedCheckmarkBadge(metaId: meta.id, type: meta.type)
@@ -299,7 +309,7 @@ private struct SearchResultCard: View {
                             .foregroundColor(.white.opacity(0.45))
                             .lineLimit(1)
                     }
-                    .frame(width: 210, alignment: .leading)
+                    .frame(width: SearchGridMetrics.posterWidth, alignment: .leading)
                 }
             }
             .scaleEffect(focused ? 1.06 : 1.0)
