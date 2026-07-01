@@ -266,6 +266,22 @@ enum ContinueWatchingStore {
         persist(items().filter { $0.meta.id != metaId })
     }
 
+    static func mergeRemote(_ remoteItems: [ContinueWatchingItem]) {
+        guard !remoteItems.isEmpty else { return }
+        var byId: [String: ContinueWatchingItem] = [:]
+        (items() + remoteItems).forEach { item in
+            let existing = byId[item.meta.id]
+            if existing == nil || item.lastWatchedAt > existing!.lastWatchedAt {
+                byId[item.meta.id] = item
+            }
+        }
+        persist(Array(byId.values).sorted { $0.lastWatchedAt > $1.lastWatchedAt }.prefix(maxItems).map { $0 })
+    }
+
+    static func replaceAll(_ newItems: [ContinueWatchingItem]) {
+        persist(Array(newItems.sorted { $0.lastWatchedAt > $1.lastWatchedAt }.prefix(maxItems)))
+    }
+
     private static func shouldKeep(position: Double, duration: Double) -> Bool {
         guard duration >= 60, position >= 10 else { return false }
         let remaining = duration - position
@@ -371,6 +387,23 @@ enum LibraryStore {
         })
     }
 
+    static func mergeRemote(_ remoteItems: [LibraryStoreItem]) {
+        guard !remoteItems.isEmpty else { return }
+        var byKey: [String: LibraryStoreItem] = [:]
+        (items() + remoteItems).forEach { item in
+            let key = "\(item.meta.type.lowercased()):\(item.meta.id)"
+            let existing = byKey[key]
+            if existing == nil || item.addedAt > existing!.addedAt {
+                byKey[key] = item
+            }
+        }
+        persist(Array(byKey.values).sorted { $0.addedAt > $1.addedAt })
+    }
+
+    static func replaceAll(_ newItems: [LibraryStoreItem]) {
+        persist(newItems.sorted { $0.addedAt > $1.addedAt })
+    }
+
     private static func persist(_ items: [LibraryStoreItem]) {
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
@@ -437,6 +470,23 @@ enum WatchedStore {
         persist(items().filter {
             !($0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame)
         })
+    }
+
+    static func mergeRemote(_ remoteItems: [WatchedStoreItem]) {
+        guard !remoteItems.isEmpty else { return }
+        var byKey: [String: WatchedStoreItem] = [:]
+        (items() + remoteItems).forEach { item in
+            let key = "\(item.meta.type.lowercased()):\(item.meta.id)"
+            let existing = byKey[key]
+            if existing == nil || item.watchedAt > existing!.watchedAt {
+                byKey[key] = item
+            }
+        }
+        persist(Array(byKey.values).sorted { $0.watchedAt > $1.watchedAt })
+    }
+
+    static func replaceAll(_ newItems: [WatchedStoreItem]) {
+        persist(newItems.sorted { $0.watchedAt > $1.watchedAt })
     }
 
     private static func persist(_ items: [WatchedStoreItem]) {

@@ -507,6 +507,49 @@ struct TrackInfo {
     let selected: Bool
 }
 
+// MARK: - Network buffer sizing
+
+/// libmpv network-cache sizes, driven by Settings → Playback → Network Cache.
+/// `forwardBuffer` is how far ahead mpv prefetches ("preload"); `backBuffer`
+/// keeps already-played data resident for instant backward seeks. Values are
+/// libmpv bytesize strings (e.g. `"1024MiB"`).
+///
+/// The buffer is a cap, not a fixed allocation, but it fills fastest on exactly
+/// the heavy content (fast host, high-bitrate 4K) where tvOS is most likely to
+/// jetsam the app. "Large" opts into the full 1 GB regardless; "Auto" scales the
+/// ceiling to the device's RAM so a 2 GB Apple TV HD isn't pushed toward an OOM
+/// kill while a 4 GB Apple TV 4K still gets the big preload.
+struct PlaybackCacheSettings {
+    let forwardBuffer: String
+    let backBuffer: String
+
+    static var current: PlaybackCacheSettings {
+        switch ProfileSettings.current.string(forKey: SettingsKey.networkCache) ?? "Auto" {
+        case "Small":
+            return PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+        case "Medium":
+            return PlaybackCacheSettings(forwardBuffer: "512MiB", backBuffer: "128MiB")
+        case "Large":
+            return PlaybackCacheSettings(forwardBuffer: "1024MiB", backBuffer: "256MiB")
+        default:
+            return auto
+        }
+    }
+
+    /// Ceiling scaled to total device RAM (`physicalMemory` is bytes):
+    /// > 3.5 GB → 1 GB, ~3 GB → 512 MiB, ≤ 2 GB (Apple TV HD) → 256 MiB.
+    private static var auto: PlaybackCacheSettings {
+        let gib = Double(ProcessInfo.processInfo.physicalMemory) / 1_073_741_824.0
+        if gib > 3.5 {
+            return PlaybackCacheSettings(forwardBuffer: "1024MiB", backBuffer: "256MiB")
+        } else if gib > 2.5 {
+            return PlaybackCacheSettings(forwardBuffer: "512MiB", backBuffer: "128MiB")
+        } else {
+            return PlaybackCacheSettings(forwardBuffer: "256MiB", backBuffer: "64MiB")
+        }
+    }
+}
+
 // MARK: - MPV Player View Controller (tvOS)
 //
 // Self-contained libmpv host. Ported from the iOS bridge, with the Kotlin/
@@ -613,6 +656,20 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "ao", Self.defaultAudioOutput))
         checkError(mpv_set_option_string(mpv, "audio-channels", "auto"))
         checkError(mpv_set_option_string(mpv, "audio-fallback-to-null", "yes"))
+
+        // Network buffering. Stremio/debrid links are bursty and often throttle,
+        // so prefetch aggressively: `demuxer-max-bytes` is the forward ("preload")
+        // buffer — up to ~1 GB by default — and `demuxer-max-back-bytes` keeps
+        // already-played data so backward seeks are instant instead of re-fetched.
+        // `cache-secs`/`demuxer-readahead-secs` are set high enough that the byte
+        // caps, not a time window, are what bound how much gets pulled ahead. Sizes
+        // follow Settings → Playback → Network Cache.
+        let cache = PlaybackCacheSettings.current
+        checkError(mpv_set_option_string(mpv, "cache", "yes"))
+        checkError(mpv_set_option_string(mpv, "cache-secs", "3600"))
+        checkError(mpv_set_option_string(mpv, "demuxer-readahead-secs", "3600"))
+        checkError(mpv_set_option_string(mpv, "demuxer-max-bytes", cache.forwardBuffer))
+        checkError(mpv_set_option_string(mpv, "demuxer-max-back-bytes", cache.backBuffer))
         checkError(mpv_set_option_string(mpv, "vulkan-swap-mode", "fifo"))
         checkError(mpv_set_option_string(mpv, "vulkan-queue-count", "1"))
         checkError(mpv_set_option_string(mpv, "vulkan-async-compute", "no"))

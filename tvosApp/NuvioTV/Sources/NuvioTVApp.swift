@@ -54,6 +54,7 @@ struct ContentView: View {
     @State private var selectedTab: TVTab = .home
     @StateObject private var authManager = AuthManager()
     @StateObject private var profileViewModel = ProfileViewModel()
+    @StateObject private var syncManager = NuvioSyncManager()
     @StateObject private var searchViewModel = SearchViewModel()
     @StateObject private var libraryViewModel = LibraryViewModel()
     // Owned here (not inside TVHomeView) so the Home catalog + focused card
@@ -110,6 +111,7 @@ struct ContentView: View {
         // on Home, so Menu there keeps its normal tab-level behaviour.
         .onExitCommand(perform: isOverlayPresented ? dismissOverlay : nil)
         .onAppear {
+            syncManager.attach(authManager: authManager, profileViewModel: profileViewModel)
             guard !resolvedInitialScreen else { return }
             resolvedInitialScreen = true
             // Skip the login gate if a session was restored or the user has
@@ -117,6 +119,12 @@ struct ContentView: View {
             if !authManager.shouldShowLoginGate {
                 activeScreen = .profileSelection
             }
+        }
+        .onReceive(authManager.$authState) { state in
+            syncManager.authStateChanged(state)
+        }
+        .onReceive(profileViewModel.$activeProfile) { profile in
+            syncManager.activeProfileChanged(profile)
         }
     }
 
@@ -147,6 +155,61 @@ struct ContentView: View {
             }
         default:
             break
+        }
+    }
+
+    /// Routes a chosen stream either to an installed external player (per the
+    /// External Player setting) or the built-in mpv player. Trailers always use
+    /// the built-in player since they are YouTube-resolved. If the external app
+    /// isn't installed / declines to open, playback falls back to the built-in
+    /// player so the user is never left on a dead end.
+    private func presentPlayback(
+        url: URL,
+        meta: NuvioMeta,
+        subtitle: String,
+        externalSubtitles: [NuvioSubtitle],
+        resumeFrom: Double?
+    ) {
+        let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
+        let player = ExternalPlayer.from(
+            ProfileSettings.store(for: profileViewModel.activeProfile?.id)
+                .string(forKey: SettingsKey.externalPlayer)
+        )
+
+        // Hand off to the external app only when it is actually installed
+        // (`canOpenURL` needs its scheme in LSApplicationQueriesSchemes); if it
+        // isn't, fall through to the built-in player instead of a dead launch.
+        if !isTrailer,
+           let launchURL = player.launchURL(for: url),
+           UIApplication.shared.canOpenURL(launchURL) {
+            UIApplication.shared.open(launchURL, options: [:], completionHandler: nil)
+            return
+        }
+
+        presentBuiltInPlayer(
+            url: url,
+            meta: meta,
+            subtitle: subtitle,
+            externalSubtitles: externalSubtitles,
+            resumeFrom: resumeFrom
+        )
+    }
+
+    private func presentBuiltInPlayer(
+        url: URL,
+        meta: NuvioMeta,
+        subtitle: String,
+        externalSubtitles: [NuvioSubtitle],
+        resumeFrom: Double?
+    ) {
+        withAnimation(.easeInOut(duration: 0.28)) {
+            activeScreen = .player(
+                url: url,
+                meta: meta,
+                subtitle: subtitle,
+                externalSubtitles: externalSubtitles,
+                resumeFrom: resumeFrom
+            )
         }
     }
 
@@ -204,15 +267,18 @@ struct ContentView: View {
                 }
             },
             onResumePlayback: { item in
-                if let url = URL(string: item.streamUrl) {
+                let streamUrl = item.streamUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !streamUrl.isEmpty, let url = URL(string: streamUrl) {
+                    presentPlayback(
+                        url: url,
+                        meta: item.meta,
+                        subtitle: "",
+                        externalSubtitles: [],
+                        resumeFrom: item.resumePosition
+                    )
+                } else {
                     withAnimation(.easeInOut(duration: 0.28)) {
-                        activeScreen = .player(
-                            url: url,
-                            meta: item.meta,
-                            subtitle: "",
-                            externalSubtitles: [],
-                            resumeFrom: item.resumePosition
-                        )
+                        activeScreen = .details(id: item.meta.id, type: item.meta.type)
                     }
                 }
             }
@@ -227,15 +293,13 @@ struct ContentView: View {
             onPlayClick: { streamUrlString, meta, subtitle, externalSubtitles in
                 if let url = URL(string: streamUrlString) {
                     let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
-                    withAnimation(.easeInOut(duration: 0.28)) {
-                        activeScreen = .player(
-                            url: url,
-                            meta: meta,
-                            subtitle: subtitle,
-                            externalSubtitles: externalSubtitles,
-                            resumeFrom: isTrailer ? nil : ContinueWatchingStore.item(for: meta.id)?.resumePosition
-                        )
-                    }
+                    presentPlayback(
+                        url: url,
+                        meta: meta,
+                        subtitle: subtitle,
+                        externalSubtitles: externalSubtitles,
+                        resumeFrom: isTrailer ? nil : ContinueWatchingStore.item(for: meta.id)?.resumePosition
+                    )
                 }
             },
             onBack: {

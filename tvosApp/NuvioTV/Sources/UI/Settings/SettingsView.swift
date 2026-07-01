@@ -73,6 +73,7 @@ enum SettingsKey {
     static let streamAddonManifestURL = "nuvio.tv.settings.integrations.streamAddonManifestURL"
 
     static let playerEngine = "nuvio.tv.settings.playback.playerEngine"
+    static let externalPlayer = "nuvio.tv.settings.playback.externalPlayer"
     static let smartStreamSelection = "nuvio.tv.settings.playback.smartStreamSelection"
     static let smartStreamQuality = "nuvio.tv.settings.playback.smartStreamQuality"
     static let smartSubtitleMatching = "nuvio.tv.settings.playback.smartSubtitleMatching"
@@ -100,7 +101,7 @@ enum SettingsKey {
         continueWatchingSort, hideUnreleased, showFullDates,
         traktConnected, tmdbEnabled, tmdbApiKey, mdbListEnabled, mdbListApiKey,
         debridProvider, debridApiKey, streamAddonManifestURL,
-        playerEngine, smartStreamSelection, smartStreamQuality, smartSubtitleMatching,
+        playerEngine, externalPlayer, smartStreamSelection, smartStreamQuality, smartSubtitleMatching,
         autoPlayNext, trailersEnabled, trailerDelay, audioLanguage,
         subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
         forcedSubtitles, subtitleSize, frameRateMatching, networkCache,
@@ -955,6 +956,7 @@ private struct PlaybackSettingsView: View {
     let onSubtitleLanguages: () -> Void
 
     @AppStorage(SettingsKey.playerEngine) private var playerEngine = "Auto"
+    @AppStorage(SettingsKey.externalPlayer) private var externalPlayer = ExternalPlayer.builtIn.rawValue
     @AppStorage(SettingsKey.smartStreamSelection) private var smartStreamSelection = false
     @AppStorage(SettingsKey.smartStreamQuality) private var smartStreamQuality = "Highest"
     @AppStorage(SettingsKey.smartSubtitleMatching) private var smartSubtitleMatching = true
@@ -970,6 +972,7 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.networkCache) private var networkCache = "Auto"
 
     private let engines = ["Auto", "AVPlayer", "MPVKit"]
+    private let externalPlayers = ExternalPlayer.settingsOptions
     private let streamQualities = ["Highest", "4K", "1080p", "720p", "Smallest"]
     private let languages = ["System", "English", "Arabic", "Norwegian", "Spanish", "French", "German", "Japanese"]
     private let frameRateModes = ["Off", "On start/stop", "Always"]
@@ -986,6 +989,14 @@ private struct PlaybackSettingsView: View {
                     accentColor: accentColor
                 )
                 .settingsEntryAnchor()
+
+                SettingsOptionRow(
+                    title: "External Player",
+                    subtitle: "Hand streams to another installed app (Infuse, VLC, Outplayer)",
+                    selection: $externalPlayer,
+                    options: externalPlayers,
+                    accentColor: accentColor
+                )
 
                 SettingsToggleRow(
                     title: "Auto-Play Next Episode",
@@ -1004,7 +1015,7 @@ private struct PlaybackSettingsView: View {
 
                 SettingsOptionRow(
                     title: "Network Cache",
-                    subtitle: "Buffer size preference for streamed video",
+                    subtitle: "Preload buffer size — Auto scales to device RAM, Large forces 1 GB",
                     selection: $networkCache,
                     options: cacheModes,
                     accentColor: accentColor

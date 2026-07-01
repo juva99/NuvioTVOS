@@ -69,6 +69,25 @@ final class AuthManager: ObservableObject {
         }
     }
 
+    func currentSessionForSync() -> AuthSession? {
+        store.load()
+    }
+
+    func validSessionForSync() async -> AuthSession? {
+        guard let session = store.load() else { return nil }
+        guard session.isExpired else { return session }
+        return await refreshSessionForSync()
+    }
+
+    func refreshSessionForSync() async -> AuthSession? {
+        guard let session = store.load() else { return nil }
+        guard let refreshed = try? await service.refresh(refreshToken: session.refreshToken) else {
+            return nil
+        }
+        apply(session: refreshed)
+        return refreshed
+    }
+
     private func apply(session: AuthSession) {
         store.save(session)
         authState = .fullAccount(userId: session.userId, email: session.email ?? "")

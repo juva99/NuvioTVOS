@@ -75,8 +75,11 @@ public struct WatchedItem: Equatable, Hashable, Identifiable {
 
 /// Pure Swift stub for ProfileManager — persists via UserDefaults
 public class ProfileManager {
+    static let profilesChangedNotification = Notification.Name("nuvio.tv.profiles.changed")
+
     private static let profilesKey = "nuvio.profiles"
     private static let activePinKey = "nuvio.active_profile_id"
+    private static let maxProfiles = 6
 
     public init(baseDir: String) throws {
         // No-op for stub — we use UserDefaults
@@ -92,8 +95,9 @@ public class ProfileManager {
 
     public func createProfile(input: CreateProfileInput) throws -> Profile {
         var profiles = (try? getProfiles()) ?? []
+        let id = nextProfileId(in: profiles)
         let profile = Profile(
-            id: UUID().uuidString,
+            id: id,
             name: input.name,
             isPinProtected: input.pin != nil,
             isAdmin: false,
@@ -122,6 +126,17 @@ public class ProfileManager {
         saveProfiles(profiles)
     }
 
+    public func replaceProfiles(_ profiles: [Profile]) throws {
+        saveProfiles(profiles)
+        if let activeId = UserDefaults.standard.string(forKey: Self.activePinKey),
+           profiles.contains(where: { $0.id == activeId }) {
+            return
+        }
+        if let first = profiles.first {
+            UserDefaults.standard.set(first.id, forKey: Self.activePinKey)
+        }
+    }
+
     public func verifyPin(id: String, pin: String) throws -> Bool {
         // Stub: always valid (real PIN verification would come from Rust)
         return true
@@ -131,7 +146,16 @@ public class ProfileManager {
         let stored = profiles.map { StoredProfile(from: $0) }
         if let data = try? JSONEncoder().encode(stored) {
             UserDefaults.standard.set(data, forKey: Self.profilesKey)
+            NotificationCenter.default.post(name: Self.profilesChangedNotification, object: nil)
         }
+    }
+
+    private func nextProfileId(in profiles: [Profile]) -> String {
+        let used = Set(profiles.compactMap { Int($0.id) })
+        if let next = (1...Self.maxProfiles).first(where: { !used.contains($0) }) {
+            return String(next)
+        }
+        return UUID().uuidString
     }
 }
 
@@ -213,7 +237,7 @@ public class ProfileViewModel: ObservableObject {
         guard let manager = profileManager else {
             // Seed a default profile so the UI isn't empty
             if profiles.isEmpty {
-                profiles = [Profile(id: UUID().uuidString, name: "Nuvio User", isPinProtected: false, isAdmin: true, avatarId: "default")]
+                profiles = [Profile(id: "1", name: "Nuvio User", isPinProtected: false, isAdmin: true, avatarId: "default")]
             }
             return
         }
@@ -300,6 +324,17 @@ public class ProfileViewModel: ObservableObject {
             pinError = nil
         } catch {
             print("Failed to switch profile: \(error)")
+        }
+    }
+
+    public func applyRemoteProfiles(_ remoteProfiles: [Profile]) {
+        guard !remoteProfiles.isEmpty else { return }
+        do {
+            try profileManager?.replaceProfiles(remoteProfiles)
+            loadProfiles()
+            loadActiveProfile()
+        } catch {
+            print("Failed to apply remote profiles: \(error)")
         }
     }
 }
