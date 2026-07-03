@@ -1,5 +1,5 @@
 # Podfile for NuvioTV
-# Pure Swift/SwiftUI tvOS application with Rust SDK integration
+# Pure Swift/SwiftUI tvOS application
 
 platform :tvos, '15.1'
 
