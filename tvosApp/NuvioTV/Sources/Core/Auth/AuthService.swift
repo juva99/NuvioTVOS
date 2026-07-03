@@ -13,7 +13,7 @@ struct AuthService {
     private let decoder = JSONDecoder()
 
     private var baseURL: String { AuthConfig.normalizedSupabaseURL }
-    private var anonKey: String { AuthConfig.anonKey }
+    private var apiKey: String { AuthConfig.apiKey }
 
     // MARK: - Email auth
 
@@ -23,7 +23,7 @@ struct AuthService {
             path: "/auth/v1/token",
             query: ["grant_type": "password"],
             method: "POST",
-            bearer: anonKey,
+            bearer: apiKey,
             json: ["email": email, "password": password]
         )
         return try authSession(from: token)
@@ -34,7 +34,7 @@ struct AuthService {
         let token: SupabaseTokenResponse = try await request(
             path: "/auth/v1/signup",
             method: "POST",
-            bearer: anonKey,
+            bearer: apiKey,
             json: ["email": email, "password": password]
         )
         return try authSession(from: token)
@@ -48,7 +48,7 @@ struct AuthService {
         let token: SupabaseTokenResponse = try await request(
             path: "/auth/v1/signup",
             method: "POST",
-            bearer: anonKey,
+            bearer: apiKey,
             json: ["data": [String: String]()]
         )
         return try authSession(from: token)
@@ -56,11 +56,72 @@ struct AuthService {
 
     /// POST /rest/v1/rpc/start_tv_login_session
     func startTvLoginSession(accessToken: String, deviceNonce: String, deviceName: String?) async throws -> TvLoginStartResult {
+        var includeDeviceName = deviceName?.isEmpty == false
+        do {
+            return try await startTvLoginSessionRequest(
+                accessToken: accessToken,
+                deviceNonce: deviceNonce,
+                deviceName: deviceName,
+                redirectBaseURL: AuthConfig.tvLoginWebBaseURL,
+                includeDeviceName: includeDeviceName
+            )
+        } catch {
+            var lastError = error
+            if includeDeviceName && shouldRetryWithoutDeviceName(error) {
+                includeDeviceName = false
+                do {
+                    return try await startTvLoginSessionRequest(
+                        accessToken: accessToken,
+                        deviceNonce: deviceNonce,
+                        deviceName: deviceName,
+                        redirectBaseURL: AuthConfig.tvLoginWebBaseURL,
+                        includeDeviceName: false
+                    )
+                } catch {
+                    lastError = error
+                }
+            }
+
+            guard shouldRetryLegacyRedirectBase(lastError),
+                  AuthConfig.legacyTvLoginWebBaseURL != AuthConfig.tvLoginWebBaseURL else {
+                throw lastError
+            }
+
+            do {
+                return try await startTvLoginSessionRequest(
+                    accessToken: accessToken,
+                    deviceNonce: deviceNonce,
+                    deviceName: deviceName,
+                    redirectBaseURL: AuthConfig.legacyTvLoginWebBaseURL,
+                    includeDeviceName: includeDeviceName
+                )
+            } catch {
+                if includeDeviceName && shouldRetryWithoutDeviceName(error) {
+                    return try await startTvLoginSessionRequest(
+                        accessToken: accessToken,
+                        deviceNonce: deviceNonce,
+                        deviceName: deviceName,
+                        redirectBaseURL: AuthConfig.legacyTvLoginWebBaseURL,
+                        includeDeviceName: false
+                    )
+                }
+                throw error
+            }
+        }
+    }
+
+    private func startTvLoginSessionRequest(
+        accessToken: String,
+        deviceNonce: String,
+        deviceName: String?,
+        redirectBaseURL: String,
+        includeDeviceName: Bool
+    ) async throws -> TvLoginStartResult {
         var body: [String: Any] = [
             "p_device_nonce": deviceNonce,
-            "p_redirect_base_url": AuthConfig.tvLoginWebBaseURL
+            "p_redirect_base_url": redirectBaseURL
         ]
-        if let deviceName, !deviceName.isEmpty { body["p_device_name"] = deviceName }
+        if includeDeviceName, let deviceName, !deviceName.isEmpty { body["p_device_name"] = deviceName }
         let rows: [TvLoginStartResult] = try await request(
             path: "/rest/v1/rpc/start_tv_login_session",
             method: "POST",
@@ -97,12 +158,15 @@ struct AuthService {
             json: ["code": code, "device_nonce": deviceNonce]
         )
         let user = try await getUser(accessToken: result.accessToken)
+        let expiresAt = result.expiresAt ??
+            result.expiresIn.map { Date().timeIntervalSince1970 + $0 } ??
+            jwtExpiry(result.accessToken)
         return AuthSession(
             accessToken: result.accessToken,
             refreshToken: result.refreshToken,
             userId: user.id,
             email: user.email,
-            expiresAt: jwtExpiry(result.accessToken)
+            expiresAt: expiresAt
         )
     }
 
@@ -112,7 +176,7 @@ struct AuthService {
             path: "/auth/v1/token",
             query: ["grant_type": "refresh_token"],
             method: "POST",
-            bearer: anonKey,
+            bearer: apiKey,
             json: ["refresh_token": refreshToken]
         )
         return try authSession(from: token)
@@ -125,6 +189,16 @@ struct AuthService {
             method: "GET",
             bearer: accessToken,
             json: nil
+        )
+    }
+
+    /// POST /auth/v1/logout
+    func signOut(accessToken: String) async throws {
+        let _: EmptyResponse = try await request(
+            path: "/auth/v1/logout",
+            method: "POST",
+            bearer: accessToken,
+            json: [String: String]()
         )
     }
 
@@ -152,7 +226,7 @@ struct AuthService {
         json: [String: Any]?
     ) async throws -> T {
         guard AuthConfig.isConfigured else {
-            throw AuthError(message: "Account backend is not configured. Add your Supabase URL and anon key in AuthConfig.swift.")
+            throw AuthError(message: "Account backend is not configured. Add the Nuvio API URL and publishable key in AuthConfig.swift.")
         }
         guard var components = URLComponents(string: baseURL + path) else {
             throw AuthError(message: "Invalid backend URL")
@@ -166,7 +240,7 @@ struct AuthService {
 
         var req = URLRequest(url: url)
         req.httpMethod = method
-        req.setValue(anonKey, forHTTPHeaderField: "apikey")
+        req.setValue(apiKey, forHTTPHeaderField: "apikey")
         req.setValue("Bearer \(bearer)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         if let json {
@@ -179,6 +253,9 @@ struct AuthService {
         }
         guard (200..<300).contains(http.statusCode) else {
             throw AuthError(message: Self.serverErrorMessage(data: data, status: http.statusCode))
+        }
+        if data.isEmpty, T.self == EmptyResponse.self {
+            return EmptyResponse() as! T
         }
         do {
             return try decoder.decode(T.self, from: data)
@@ -195,7 +272,26 @@ struct AuthService {
         }
         return "Request failed (\(status))"
     }
+
+    private func shouldRetryWithoutDeviceName(_ error: Error) -> Bool {
+        let message = friendlyMessage(error).lowercased()
+        return message.contains("p_device_name") &&
+            message.contains("start_tv_login_session")
+    }
+
+    private func shouldRetryLegacyRedirectBase(_ error: Error) -> Bool {
+        let message = friendlyMessage(error).lowercased()
+        return message.contains("redirect") ||
+            message.contains("base_url") ||
+            message.contains("not allowed")
+    }
+
+    private func friendlyMessage(_ error: Error) -> String {
+        (error as? AuthError)?.message ?? error.localizedDescription
+    }
 }
+
+private struct EmptyResponse: Decodable {}
 
 /// Best-effort expiry extraction from a JWT's `exp` claim.
 private func jwtExpiry(_ jwt: String) -> TimeInterval? {

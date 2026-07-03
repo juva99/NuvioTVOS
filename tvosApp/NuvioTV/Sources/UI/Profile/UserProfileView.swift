@@ -5,6 +5,7 @@ public struct UserProfileView: View {
     @State private var showingAddProfile = false
     @State private var newProfileName = ""
     @State private var newProfilePin = ""
+    @State private var newProfileAvatarId = ProfileAvatarCatalog.defaultId
     @FocusState private var focusedItem: String?
 
     private static let addProfileFocusId = "add_profile"
@@ -66,10 +67,20 @@ public struct UserProfileView: View {
                 }
             }
             .sheet(isPresented: $showingAddProfile) {
-                AddProfileView(isPresented: $showingAddProfile, name: $newProfileName, pin: $newProfilePin) {
-                    viewModel.createProfile(name: newProfileName, pin: newProfilePin.isEmpty ? nil : newProfilePin)
+                AddProfileView(
+                    isPresented: $showingAddProfile,
+                    name: $newProfileName,
+                    pin: $newProfilePin,
+                    avatarId: $newProfileAvatarId
+                ) {
+                    viewModel.createProfile(
+                        name: newProfileName,
+                        pin: newProfilePin.isEmpty ? nil : newProfilePin,
+                        avatarId: newProfileAvatarId
+                    )
                     newProfileName = ""
                     newProfilePin = ""
+                    newProfileAvatarId = ProfileAvatarCatalog.defaultId
                 }
             }
         }
@@ -114,20 +125,12 @@ struct ProfileCard: View {
     var body: some View {
         Button(action: action) {
             VStack(spacing: 18) {
-                ZStack {
-                    Circle().fill(ProfileAvatarStyle.color(for: profile.id))
-
-                    Text(initial)
-                        .font(.custom("Inter-Bold", size: 74))
-                        .foregroundColor(.white)
-                }
-                .frame(width: avatarSize, height: avatarSize)
-                .overlay(alignment: .bottomTrailing) { badge }
-                .overlay(
-                    Circle()
-                        .stroke(Color.white.opacity(isFocused ? 0.86 : 0), lineWidth: isFocused ? 3 : 0)
+                ProfileAvatarView(
+                    avatarId: profile.avatarId,
+                    size: avatarSize,
+                    isFocused: isFocused
                 )
-                .shadow(color: isFocused ? Color.white.opacity(0.3) : .clear, radius: 24)
+                .overlay(alignment: .bottomTrailing) { badge }
 
                 VStack(spacing: 4) {
                     Text(profile.name)
@@ -166,10 +169,6 @@ struct ProfileCard: View {
                 .background(Circle().fill(Color.black.opacity(0.8)))
                 .offset(x: 2, y: 2)
         }
-    }
-
-    private var initial: String {
-        String(profile.name.prefix(1)).uppercased()
     }
 }
 
@@ -217,26 +216,116 @@ private struct ProfilePlainButtonStyle: ButtonStyle {
     }
 }
 
-/// Stable, per-profile avatar colors so a profile keeps the same tint across
-/// launches (Swift's String.hashValue is seeded per run, so it can't be used).
+struct ProfileAvatar: Identifiable {
+    let id: String
+    let name: String
+    let symbolName: String
+    let colors: [Color]
+}
+
+enum ProfileAvatarCatalog {
+    static let defaultId = "default"
+
+    static let avatars: [ProfileAvatar] = [
+        ProfileAvatar(
+            id: defaultId,
+            name: "Nova",
+            symbolName: "sparkles",
+            colors: [Color(red: 0.98, green: 0.45, blue: 0.78), Color(red: 0.44, green: 0.32, blue: 0.94)]
+        ),
+        ProfileAvatar(
+            id: "orbit",
+            name: "Orbit",
+            symbolName: "moon.stars.fill",
+            colors: [Color(red: 0.18, green: 0.60, blue: 0.93), Color(red: 0.08, green: 0.20, blue: 0.52)]
+        ),
+        ProfileAvatar(
+            id: "arcade",
+            name: "Arcade",
+            symbolName: "gamecontroller.fill",
+            colors: [Color(red: 0.16, green: 0.78, blue: 0.58), Color(red: 0.03, green: 0.36, blue: 0.34)]
+        ),
+        ProfileAvatar(
+            id: "cinema",
+            name: "Cinema",
+            symbolName: "film.fill",
+            colors: [Color(red: 0.94, green: 0.24, blue: 0.20), Color(red: 0.50, green: 0.08, blue: 0.18)]
+        ),
+        ProfileAvatar(
+            id: "bolt",
+            name: "Bolt",
+            symbolName: "bolt.fill",
+            colors: [Color(red: 1.0, green: 0.70, blue: 0.20), Color(red: 0.93, green: 0.31, blue: 0.18)]
+        ),
+        ProfileAvatar(
+            id: "heart",
+            name: "Heart",
+            symbolName: "heart.fill",
+            colors: [Color(red: 1.0, green: 0.42, blue: 0.58), Color(red: 0.65, green: 0.10, blue: 0.30)]
+        ),
+        ProfileAvatar(
+            id: "music",
+            name: "Music",
+            symbolName: "music.note",
+            colors: [Color(red: 0.38, green: 0.72, blue: 1.0), Color(red: 0.20, green: 0.32, blue: 0.78)]
+        ),
+        ProfileAvatar(
+            id: "leaf",
+            name: "Leaf",
+            symbolName: "leaf.fill",
+            colors: [Color(red: 0.39, green: 0.80, blue: 0.42), Color(red: 0.08, green: 0.42, blue: 0.26)]
+        )
+    ]
+
+    static func avatar(for id: String?) -> ProfileAvatar {
+        avatars.first(where: { $0.id == id }) ?? avatars[0]
+    }
+
+    static func symbolName(for id: String?) -> String {
+        avatar(for: id).symbolName
+    }
+}
+
+struct ProfileAvatarView: View {
+    let avatarId: String
+    var size: CGFloat
+    var isFocused: Bool = false
+
+    private var avatar: ProfileAvatar {
+        ProfileAvatarCatalog.avatar(for: avatarId)
+    }
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .fill(
+                    LinearGradient(
+                        colors: avatar.colors,
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
+                )
+
+            Image(systemName: avatar.symbolName)
+                .font(.system(size: size * 0.42, weight: .bold))
+                .foregroundColor(.white)
+                .shadow(color: .black.opacity(0.18), radius: 5, x: 0, y: 3)
+        }
+        .frame(width: size, height: size)
+        .overlay(
+            Circle()
+                .stroke(Color.white.opacity(isFocused ? 0.86 : 0.28), lineWidth: isFocused ? 3 : 1)
+        )
+        .shadow(color: isFocused ? Color.white.opacity(0.3) : .black.opacity(0.24), radius: isFocused ? 24 : 10, x: 0, y: 8)
+    }
+}
+
+/// Stable avatar color fallback for older profile surfaces.
 enum ProfileAvatarStyle {
     static let accent = Color(red: 0.98, green: 0.67, blue: 0.12) // primary star / label
 
-    private static let colors: [Color] = [
-        Color(red: 0.18, green: 0.60, blue: 0.93), // blue
-        Color(red: 0.92, green: 0.14, blue: 0.16), // red
-        Color(red: 0.16, green: 0.88, blue: 0.64), // mint
-        Color(red: 0.56, green: 0.32, blue: 0.93), // purple
-        Color(red: 0.97, green: 0.58, blue: 0.16), // amber
-        Color(red: 0.93, green: 0.31, blue: 0.61), // pink
-    ]
-
     static func color(for id: String) -> Color {
-        var hash = 5381
-        for scalar in id.unicodeScalars {
-            hash = (hash &* 33) &+ Int(scalar.value)
-        }
-        return colors[abs(hash) % colors.count]
+        ProfileAvatarCatalog.avatar(for: id).colors.first ?? .blue
     }
 }
 
@@ -244,6 +333,7 @@ struct AddProfileView: View {
     @Binding var isPresented: Bool
     @Binding var name: String
     @Binding var pin: String
+    @Binding var avatarId: String
     var onSave: () -> Void
 
     var body: some View {
@@ -255,6 +345,10 @@ struct AddProfileView: View {
                         .keyboardType(.numberPad)
                 }
 
+                Section(header: Text("Avatar")) {
+                    ProfileAvatarPicker(selectedAvatarId: $avatarId)
+                }
+
                 Button("Save") {
                     onSave()
                     isPresented = false
@@ -262,6 +356,89 @@ struct AddProfileView: View {
                 .disabled(name.isEmpty)
             }
             .navigationTitle("Add Profile")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        isPresented = false
+                    }
+                }
+            }
+        }
+    }
+}
+
+struct ProfileAvatarPicker: View {
+    @Binding var selectedAvatarId: String
+
+    private let columns = [
+        GridItem(.fixed(118), spacing: 18),
+        GridItem(.fixed(118), spacing: 18),
+        GridItem(.fixed(118), spacing: 18),
+        GridItem(.fixed(118), spacing: 18)
+    ]
+
+    var body: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
+            ForEach(ProfileAvatarCatalog.avatars) { avatar in
+                Button {
+                    selectedAvatarId = avatar.id
+                } label: {
+                    VStack(spacing: 9) {
+                        ProfileAvatarView(
+                            avatarId: avatar.id,
+                            size: 76,
+                            isFocused: avatar.id == selectedAvatarId
+                        )
+
+                        Text(avatar.name)
+                            .font(.system(size: 18, weight: .semibold))
+                            .foregroundColor(.white.opacity(0.82))
+                            .lineLimit(1)
+                    }
+                    .frame(width: 118, height: 122)
+                    .background(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .fill(avatar.id == selectedAvatarId ? Color.white.opacity(0.14) : Color.white.opacity(0.05))
+                    )
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8, style: .continuous)
+                            .stroke(Color.white.opacity(avatar.id == selectedAvatarId ? 0.5 : 0.12), lineWidth: 1)
+                    )
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(avatar.name)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+}
+
+struct ProfileAvatarPickerSheet: View {
+    @Binding var isPresented: Bool
+    let title: String
+    @State private var selectedAvatarId: String
+    let onSave: (String) -> Void
+
+    init(isPresented: Binding<Bool>, title: String, selectedAvatarId: String, onSave: @escaping (String) -> Void) {
+        _isPresented = isPresented
+        self.title = title
+        _selectedAvatarId = State(initialValue: selectedAvatarId.isEmpty ? ProfileAvatarCatalog.defaultId : selectedAvatarId)
+        self.onSave = onSave
+    }
+
+    var body: some View {
+        NavigationView {
+            Form {
+                Section(header: Text(title)) {
+                    ProfileAvatarPicker(selectedAvatarId: $selectedAvatarId)
+                }
+
+                Button("Save") {
+                    onSave(selectedAvatarId)
+                    isPresented = false
+                }
+            }
+            .navigationTitle("Choose Avatar")
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") {

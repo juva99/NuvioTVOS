@@ -12,6 +12,16 @@ private enum DiscoverGridMetrics {
 struct DiscoverSection: View {
     let onContentClick: (String, String) -> Void
     @StateObject private var viewModel = DiscoverViewModel()
+    @FocusState private var focusedCardID: String?
+    /// Last card focused in the grid, kept so returning from details (which
+    /// steals focus and nils `focusedCardID`) restores that card instead of
+    /// snapping back to the top of the grid.
+    @State private var lastFocusedCardID: String?
+    @State private var shouldRestoreFocus = false
+    /// Card to actively re-focus once the Details overlay dismisses; captured
+    /// when the tab view gets disabled (overlay up), consumed on re-enable.
+    @State private var overlayRestoreCardID: String?
+    @Environment(\.isEnabled) private var isEnabled
 
     init(onContentClick: @escaping (String, String) -> Void) {
         self.onContentClick = onContentClick
@@ -22,6 +32,34 @@ struct DiscoverSection: View {
             filterBar
             content
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        }
+        .onChange(of: focusedCardID) { newValue in
+            if let newValue {
+                lastFocusedCardID = newValue
+                shouldRestoreFocus = false
+                // Restoration complete -- lift the focus restriction.
+                if newValue == overlayRestoreCardID { overlayRestoreCardID = nil }
+            } else if lastFocusedCardID != nil {
+                shouldRestoreFocus = true
+            }
+        }
+        // Overlay dismissal re-places focus geometrically without consulting
+        // `defaultFocus`. While `overlayRestoreCardID` is set every other card
+        // is unfocusable, so the engine can only land back on the saved card
+        // -- no scroll-to-top flash. See TVHomeView for the full story.
+        .onChange(of: isEnabled) { enabled in
+            if !enabled {
+                overlayRestoreCardID = focusedCardID ?? lastFocusedCardID
+            } else if let target = overlayRestoreCardID {
+                for delay in [0.12, 0.45] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        if overlayRestoreCardID == target { focusedCardID = target }
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    if overlayRestoreCardID == target { overlayRestoreCardID = nil }
+                }
+            }
         }
     }
 
@@ -87,9 +125,10 @@ struct DiscoverSection: View {
         ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: DiscoverGridMetrics.posterGap) {
                 ForEach(viewModel.items) { item in
-                    DiscoverCard(meta: item) {
+                    DiscoverCard(meta: item, externalFocus: $focusedCardID) {
                         onContentClick(item.id, item.type)
                     }
+                    .disabled(overlayRestoreCardID != nil && overlayRestoreCardID != item.id)
                     .onAppear { viewModel.loadMoreIfNeeded(currentItem: item) }
                 }
             }
@@ -105,6 +144,8 @@ struct DiscoverSection: View {
             Color.clear.frame(height: 60)
         }
         .scrollClipDisabledIfAvailable()
+        .focusSection()
+        .defaultFocusIfAvailable($focusedCardID, shouldRestoreFocus ? lastFocusedCardID : nil)
     }
 
     private var columns: [GridItem] {
@@ -187,6 +228,7 @@ struct FilterMenu<MenuContent: View>: View {
 
 private struct DiscoverCard: View {
     let meta: NuvioMeta
+    var externalFocus: FocusState<String?>.Binding? = nil
     let action: () -> Void
     @FocusState private var focused: Bool
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
@@ -261,6 +303,7 @@ private struct DiscoverCard: View {
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($focused)
+        .modifier(ExternalFocusBinding(binding: externalFocus, id: meta.id))
         .focusEffectDisabledIfAvailable()
         .animation(smoothFocus ? .spring(response: 0.28, dampingFraction: 0.75) : nil, value: focused)
     }

@@ -165,6 +165,31 @@ enum PlaybackMarkers {
     static let trailerSubtitle = "Trailer"
 }
 
+enum EpisodeTagResolver {
+    static func episodeNumbers(in text: String) -> (season: Int, episode: Int)? {
+        let patterns = [
+            #"(?i)(?:^|[^A-Za-z0-9])S(\d{1,2})[\s._-]*E(\d{1,3})(?:[^A-Za-z0-9]|$)"#,
+            #"(?i)(?:^|[^A-Za-z0-9])(\d{1,2})x(\d{1,3})(?:[^A-Za-z0-9]|$)"#,
+            #"(?i)(?:season|s)[\s._-]*(\d{1,2})[\s._-]*(?:episode|ep|e)[\s._-]*(\d{1,3})"#,
+            #"(?i)(?:^|[^A-Za-z0-9])tt\d+:(\d{1,2}):(\d{1,3})(?:[^A-Za-z0-9]|$)"#
+        ]
+
+        for pattern in patterns {
+            guard let match = text.range(of: pattern, options: .regularExpression) else { continue }
+            let numbers = text[match]
+                .components(separatedBy: CharacterSet.decimalDigits.inverted)
+                .filter { !$0.isEmpty }
+                .compactMap { Int($0) }
+
+            if numbers.count >= 2 {
+                return (numbers[numbers.count - 2], numbers[numbers.count - 1])
+            }
+        }
+
+        return nil
+    }
+}
+
 struct TrailerPlaybackSource {
     let videoUrl: String
     let audioUrl: String?
@@ -177,6 +202,93 @@ struct ContinueWatchingItem: Identifiable, Codable {
     let position: Double
     let duration: Double
     let lastWatchedAt: Date
+    /// Which episode this progress belongs to (nil for movies and for entries
+    /// saved before episode tracking existed — optionals keep old JSON decoding).
+    let season: Int?
+    let episode: Int?
+    /// True when this entry is a fresh next-episode suggestion (the previous
+    /// episode was finished) rather than real playback progress. Optional so
+    /// old persisted JSON keeps decoding.
+    let isUpNext: Bool?
+
+    var isUpNextEntry: Bool { isUpNext == true }
+
+    init(
+        meta: NuvioMeta,
+        streamUrl: String,
+        position: Double,
+        duration: Double,
+        lastWatchedAt: Date,
+        season: Int? = nil,
+        episode: Int? = nil,
+        isUpNext: Bool? = nil
+    ) {
+        self.meta = meta
+        self.streamUrl = streamUrl
+        self.position = position
+        self.duration = duration
+        self.lastWatchedAt = lastWatchedAt
+        self.season = season
+        self.episode = episode
+        self.isUpNext = isUpNext
+    }
+
+    /// Episode numbers for display. Entries saved before episode tracking have
+    /// nil season/episode; for those, fall back to a stream filename tag when
+    /// possible, then to the first playable episode in stored series metadata.
+    private var resolvedNumbers: (season: Int, episode: Int)? {
+        if let season, let episode { return (season, episode) }
+        guard meta.isSeries else { return nil }
+        if let numbers = EpisodeTagResolver.episodeNumbers(in: streamUrl) {
+            return numbers
+        }
+        return firstPlayableEpisode.map { ($0.season, $0.episode) }
+    }
+
+    var episodeNumbers: (season: Int, episode: Int)? {
+        resolvedNumbers
+    }
+
+    private var firstPlayableEpisode: NuvioVideo? {
+        guard let videos = meta.videos, !videos.isEmpty else { return nil }
+        let sorted = videos.sorted {
+            (seasonSortKey($0.season), $0.episode) < (seasonSortKey($1.season), $1.episode)
+        }
+        return sorted.first { $0.season > 0 } ?? sorted.first
+    }
+
+    private func seasonSortKey(_ season: Int) -> Int {
+        season <= 0 ? Int.max : season
+    }
+
+    /// "S1 E3 · Title" line for the episode in progress; nil when unknown.
+    var episodeDisplayLine: String? {
+        guard let label = episodeLabel else { return nil }
+        if let title = episodeVideo?.title, !title.isEmpty {
+            return "\(label) · \(title)"
+        }
+        return label
+    }
+
+    /// "S1 E3" label for the episode in progress; nil when unknown.
+    var episodeLabel: String? {
+        guard let numbers = resolvedNumbers else { return nil }
+        return "S\(numbers.season) E\(numbers.episode)"
+    }
+
+    /// The full episode entry from the stored series meta, carrying the
+    /// episode's title and overview for display.
+    var episodeVideo: NuvioVideo? {
+        guard let numbers = resolvedNumbers else { return nil }
+        return meta.videos?.first { $0.season == numbers.season && $0.episode == numbers.episode }
+    }
+
+    /// Player-style episode line ("S1 · E3 · Title"); nil when unknown.
+    var episodeSubtitle: String? {
+        guard let numbers = resolvedNumbers else { return nil }
+        let title = episodeVideo?.title ?? "Episode \(numbers.episode)"
+        return "S\(numbers.season) · E\(numbers.episode) · \(title)"
+    }
 
     var progress: Double {
         guard duration > 0 else { return 0 }
@@ -245,18 +357,23 @@ enum ContinueWatchingStore {
         items().first { $0.meta.id == metaId }
     }
 
-    static func save(meta: NuvioMeta, streamUrl: String, position: Double, duration: Double) {
+    static func save(meta: NuvioMeta, streamUrl: String, position: Double, duration: Double, season: Int? = nil, episode: Int? = nil) {
         guard shouldKeep(position: position, duration: duration) else {
             remove(metaId: meta.id)
             return
         }
 
+        // A save that doesn't know its episode (resume paths that only carry a
+        // stream URL) must not erase the episode identity an earlier save recorded.
+        let existing = item(for: meta.id)
         let item = ContinueWatchingItem(
             meta: meta,
             streamUrl: streamUrl,
             position: position,
             duration: duration,
-            lastWatchedAt: Date()
+            lastWatchedAt: Date(),
+            season: season ?? existing?.season,
+            episode: episode ?? existing?.episode
         )
         let updated = ([item] + items().filter { $0.meta.id != meta.id }).prefix(maxItems)
         persist(Array(updated))
@@ -269,9 +386,12 @@ enum ContinueWatchingStore {
     static func mergeRemote(_ remoteItems: [ContinueWatchingItem]) {
         guard !remoteItems.isEmpty else { return }
         var byId: [String: ContinueWatchingItem] = [:]
+        // Remote items come second and win timestamp ties, so a re-pull can
+        // refresh an entry's presentation (e.g. up-next state) even when the
+        // underlying remote row hasn't moved.
         (items() + remoteItems).forEach { item in
             let existing = byId[item.meta.id]
-            if existing == nil || item.lastWatchedAt > existing!.lastWatchedAt {
+            if existing == nil || item.lastWatchedAt >= existing!.lastWatchedAt {
                 byId[item.meta.id] = item
             }
         }
@@ -283,7 +403,9 @@ enum ContinueWatchingStore {
     }
 
     private static func shouldKeep(position: Double, duration: Double) -> Bool {
-        guard duration >= 60, position >= 10 else { return false }
+        // Any started playback counts (> 0), matching the phone app's rule —
+        // a stricter threshold here hides items the phone still lists.
+        guard duration >= 60, position > 0 else { return false }
         let remaining = duration - position
         return remaining >= 60 && (position / duration) < 0.92
     }
@@ -291,6 +413,16 @@ enum ContinueWatchingStore {
     private static func persist(_ items: [ContinueWatchingItem]) {
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    /// Deletes every profile's watch history (and the legacy shared list).
+    /// Called on sign-out so the next user starts with no resume state.
+    static func eraseAllProfiles() {
+        let defaults = UserDefaults.standard
+        defaults.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(baseKey) }
+            .forEach { defaults.removeObject(forKey: $0) }
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -409,12 +541,36 @@ enum LibraryStore {
         UserDefaults.standard.set(data, forKey: storageKey)
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
+
+    /// Deletes every profile's library (and the legacy shared one) on sign-out.
+    static func eraseAllProfiles() {
+        let defaults = UserDefaults.standard
+        defaults.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(baseKey) }
+            .forEach { defaults.removeObject(forKey: $0) }
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
 }
 
 struct WatchedStoreItem: Identifiable, Codable {
-    var id: String { "\(meta.type):\(meta.id)" }
+    var id: String {
+        if let season, let episode {
+            return "\(meta.type):\(meta.id):s\(season)e\(episode)"
+        }
+        return "\(meta.type):\(meta.id)"
+    }
     let meta: NuvioMeta
     let watchedAt: Date
+    /// Which episode this entry marks; nil for movies and whole-title marks.
+    let season: Int?
+    let episode: Int?
+
+    init(meta: NuvioMeta, watchedAt: Date, season: Int? = nil, episode: Int? = nil) {
+        self.meta = meta
+        self.watchedAt = watchedAt
+        self.season = season
+        self.episode = episode
+    }
 }
 
 enum WatchedStore {
@@ -442,8 +598,30 @@ enum WatchedStore {
         return decoded.sorted { $0.watchedAt > $1.watchedAt }
     }
 
+    /// Whole-title watched state (movies, or a series marked watched
+    /// explicitly). Episode-level entries deliberately don't count here so one
+    /// finished episode doesn't checkmark the whole series poster.
     static func contains(metaId: String, type: String) -> Bool {
-        items().contains { $0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame }
+        items().contains {
+            $0.meta.id == metaId
+                && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame
+                && $0.season == nil && $0.episode == nil
+        }
+    }
+
+    static func containsEpisode(metaId: String, season: Int, episode: Int) -> Bool {
+        items().contains { $0.meta.id == metaId && $0.season == season && $0.episode == episode }
+    }
+
+    /// "season:episode" keys of every watched episode of a series, for the
+    /// Details episode strip.
+    static func watchedEpisodeKeys(metaId: String) -> Set<String> {
+        Set(items().compactMap { item in
+            guard item.meta.id == metaId, let season = item.season, let episode = item.episode else {
+                return nil
+            }
+            return "\(season):\(episode)"
+        })
     }
 
     @discardableResult
@@ -457,32 +635,109 @@ enum WatchedStore {
         return true
     }
 
-    static func markWatched(_ meta: NuvioMeta) {
+    static func markWatched(_ meta: NuvioMeta, season: Int? = nil, episode: Int? = nil) {
         ContinueWatchingStore.remove(metaId: meta.id)
-        let item = WatchedStoreItem(meta: meta, watchedAt: Date())
+        let item = WatchedStoreItem(meta: meta, watchedAt: Date(), season: season, episode: episode)
         let updated = [item] + items().filter {
-            !($0.meta.id == meta.id && $0.meta.type.caseInsensitiveCompare(meta.type) == .orderedSame)
+            !($0.meta.id == meta.id
+                && $0.meta.type.caseInsensitiveCompare(meta.type) == .orderedSame
+                && $0.season == season && $0.episode == episode)
         }
+        clearTombstone(metaId: meta.id, season: season, episode: episode)
         persist(updated)
     }
 
+    /// Removes the whole-title mark only; per-episode history stays. Leaves a
+    /// tombstone so the next sync deletes the remote row instead of pulling the
+    /// mark right back.
     static func remove(metaId: String, type: String) {
+        addTombstone(metaId: metaId, season: nil, episode: nil)
         persist(items().filter {
-            !($0.meta.id == metaId && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame)
+            !($0.meta.id == metaId
+                && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame
+                && $0.season == nil && $0.episode == nil)
         })
     }
 
+    /// Merges a FULL remote snapshot. Tombstones (locally removed marks) block
+    /// their remote row and stay alive until a pull shows the row is really
+    /// gone from the server — the pushed delete is best-effort, so the pull is
+    /// the confirmation. A newer re-watch on another device supersedes one.
     static func mergeRemote(_ remoteItems: [WatchedStoreItem]) {
-        guard !remoteItems.isEmpty else { return }
+        let removedMarks = tombstones()
+        guard !remoteItems.isEmpty || !removedMarks.isEmpty else { return }
+
+        let stillBlocking = removedMarks.filter { tombstone in
+            remoteItems.contains {
+                $0.meta.id == tombstone.metaId && $0.season == tombstone.season
+                    && $0.episode == tombstone.episode && $0.watchedAt <= tombstone.removedAt
+            }
+        }
+        if stillBlocking.count != removedMarks.count {
+            persistTombstones(stillBlocking)
+        }
+
+        let accepted = remoteItems.filter { item in
+            !stillBlocking.contains {
+                $0.metaId == item.meta.id && $0.season == item.season && $0.episode == item.episode
+            }
+        }
+
         var byKey: [String: WatchedStoreItem] = [:]
-        (items() + remoteItems).forEach { item in
-            let key = "\(item.meta.type.lowercased()):\(item.meta.id)"
+        (items() + accepted).forEach { item in
+            let key = item.id.lowercased()
             let existing = byKey[key]
             if existing == nil || item.watchedAt > existing!.watchedAt {
                 byKey[key] = item
             }
         }
         persist(Array(byKey.values).sorted { $0.watchedAt > $1.watchedAt })
+    }
+
+    // MARK: Tombstones — locally deleted marks awaiting remote deletion
+
+    struct Tombstone: Codable, Equatable {
+        let metaId: String
+        let season: Int?
+        let episode: Int?
+        let removedAt: Date
+    }
+
+    private static var tombstoneStorageKey: String {
+        guard let id = activeProfileId, !id.isEmpty else { return "\(baseKey).tombstones" }
+        return "\(baseKey).tombstones.\(id)"
+    }
+
+    static func tombstones() -> [Tombstone] {
+        guard let data = UserDefaults.standard.data(forKey: tombstoneStorageKey),
+              let decoded = try? JSONDecoder().decode([Tombstone].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    private static func addTombstone(metaId: String, season: Int?, episode: Int?) {
+        let entry = Tombstone(metaId: metaId, season: season, episode: episode, removedAt: Date())
+        let updated = tombstones().filter {
+            !($0.metaId == metaId && $0.season == season && $0.episode == episode)
+        } + [entry]
+        persistTombstones(updated)
+    }
+
+    private static func clearTombstone(metaId: String, season: Int?, episode: Int?) {
+        persistTombstones(tombstones().filter {
+            !($0.metaId == metaId && $0.season == season && $0.episode == episode)
+        })
+    }
+
+    /// Called after the remote rows were deleted successfully.
+    static func clearTombstones(_ cleared: [Tombstone]) {
+        persistTombstones(tombstones().filter { !cleared.contains($0) })
+    }
+
+    private static func persistTombstones(_ entries: [Tombstone]) {
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        UserDefaults.standard.set(data, forKey: tombstoneStorageKey)
     }
 
     static func replaceAll(_ newItems: [WatchedStoreItem]) {
@@ -492,6 +747,16 @@ enum WatchedStore {
     private static func persist(_ items: [WatchedStoreItem]) {
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    /// Deletes every profile's watched marks and tombstones (the tombstone keys
+    /// share `baseKey` as their prefix) on sign-out.
+    static func eraseAllProfiles() {
+        let defaults = UserDefaults.standard
+        defaults.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(baseKey) }
+            .forEach { defaults.removeObject(forKey: $0) }
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 }
@@ -536,6 +801,24 @@ enum ProfileSettings {
         let suite = store(for: id)
         seedFromGlobalIfNeeded(suite)
         current = suite
+    }
+
+    static func clearActiveProfile() {
+        current = .standard
+    }
+
+    /// Deletes the given profiles' settings suites and the pre-profile copies
+    /// in `.standard`, so sign-out leaves no add-ons, API keys, or preferences
+    /// behind. Points `current` back at `.standard` first so nothing keeps
+    /// writing into a removed suite.
+    static func eraseAll(profileIds: [String]) {
+        current = .standard
+        for id in Set(profileIds) where !id.isEmpty {
+            UserDefaults.standard.removePersistentDomain(forName: "\(suitePrefix).\(id)")
+        }
+        for key in SettingsKey.all {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
     }
 
     /// Clone the current profile's settings into a freshly created profile, then

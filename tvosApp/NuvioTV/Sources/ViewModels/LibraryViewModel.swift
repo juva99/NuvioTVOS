@@ -6,6 +6,10 @@ public class LibraryViewModel: ObservableObject {
     @Published public var items: [StremioMeta] = []
     @Published public var sortOption: SortOption = .dateAdded
     @Published public var groupOption: GroupOption = .none
+    /// Last focused card, kept here (outside the view, like
+    /// `TVHomeStore.lastFocusedCardID`) so it survives the details push and
+    /// returning restores that card instead of snapping to the top.
+    public var lastFocusedItemID: String?
     private var libraryObserver: NSObjectProtocol?
     
     public enum SortOption: String, CaseIterable, Identifiable {

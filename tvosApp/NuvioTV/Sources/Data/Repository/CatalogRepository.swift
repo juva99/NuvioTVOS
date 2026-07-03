@@ -52,13 +52,12 @@ final class CinemetaCatalogRepository: CatalogRepository {
     private let decoder = JSONDecoder()
     private var cachedMetaById: [String: NuvioMeta] = [:]
     private var streamAddons: [StremioStreamAddon] {
-        guard let manifestURL = Self.configuredStreamAddonManifestURL else { return [] }
-        return [
+        Self.configuredStreamAddonManifestURLs.map { manifestURL in
             StremioStreamAddon(
                 name: Self.streamAddonName(for: manifestURL),
                 manifestURL: manifestURL
             )
-        ]
+        }
     }
     private let subtitleAddons = [
         StremioSubtitleAddon(
@@ -109,34 +108,90 @@ final class CinemetaCatalogRepository: CatalogRepository {
         // Details screen uses a fresh repository (empty cache) so this always
         // fetches the full /meta payload — real episodes and per-episode ratings.
         let metaType = Self.isSeriesType(type) ? "series" : "movie"
-        let url = baseURL.appendingPathComponent("meta/\(metaType)/\(id).json")
-        let response: CinemetaMetaResponse = try await fetch(url)
-        let meta = response.meta.toMeta(fallbackType: metaType)
-        cachedMetaById[meta.id] = meta
-        return meta
+        var lastError: Error?
+
+        // Cinemeta only resolves IMDb ids; other id spaces synced from the
+        // phone app (tmdb:, kitsu:, ...) must come from the configured add-ons.
+        if id.hasPrefix("tt") {
+            do {
+                let url = baseURL.appendingPathComponent("meta/\(metaType)/\(id).json")
+                let response: CinemetaMetaResponse = try await fetch(url)
+                let meta = response.meta.toMeta(fallbackType: metaType)
+                cachedMetaById[meta.id] = meta
+                return meta
+            } catch {
+                lastError = error
+            }
+        }
+
+        for addon in streamAddons {
+            do {
+                let response: CinemetaMetaResponse = try await fetch(addon.metaURL(type: metaType, id: id))
+                let meta = response.meta.toMeta(fallbackType: metaType)
+                // Cache under the requested id too in case the addon
+                // canonicalizes to a different id space.
+                cachedMetaById[id] = meta
+                cachedMetaById[meta.id] = meta
+                return meta
+            } catch {
+                if lastError == nil { lastError = error }
+            }
+        }
+
+        throw lastError ?? URLError(.badServerResponse)
     }
 
     private static func isSeriesType(_ type: String) -> Bool {
         ["series", "show", "tv", "tvshow"].contains(type.lowercased())
     }
 
-    private static var configuredStreamAddonManifestURL: URL? {
-        let rawValue = ProfileSettings.current
-            .string(forKey: SettingsKey.streamAddonManifestURL)?
-            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        guard !rawValue.isEmpty else { return nil }
+    /// Every configured manifest URL — the manually entered one plus the list
+    /// synced from the account — deduplicated in priority order. Also read by
+    /// Settings to show the synced add-ons.
+    static var configuredStreamAddonManifestURLs: [URL] {
+        let defaults = ProfileSettings.current
+        var rawValues = defaults
+            .string(forKey: SettingsKey.streamAddonManifestURLs)?
+            .components(separatedBy: .newlines) ?? []
 
-        let normalizedValue = rawValue.contains("://") ? rawValue : "https://\(rawValue)"
+        if let single = defaults.string(forKey: SettingsKey.streamAddonManifestURL),
+           !single.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            rawValues.insert(single, at: 0)
+        }
+
+        var seen: Set<String> = []
+        return rawValues.compactMap { rawValue -> URL? in
+            guard let url = normalizedManifestURL(from: rawValue) else { return nil }
+            let key = url.absoluteString
+            guard seen.insert(key).inserted else { return nil }
+            return url
+        }
+    }
+
+    static func normalizedManifestURL(from rawValue: String) -> URL? {
+        var normalizedValue = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalizedValue.isEmpty else { return nil }
+
+        if normalizedValue.lowercased().hasPrefix("stremio://") {
+            normalizedValue = "https://\(String(normalizedValue.dropFirst("stremio://".count)))"
+        } else if !normalizedValue.contains("://") {
+            normalizedValue = "https://\(normalizedValue)"
+        }
+
         guard let url = URL(string: normalizedValue),
               let scheme = url.scheme?.lowercased(),
               ["http", "https"].contains(scheme),
               url.host != nil else {
             return nil
         }
-        return url
+
+        if url.lastPathComponent.lowercased().hasSuffix(".json") {
+            return url
+        }
+        return url.appendingPathComponent("manifest.json")
     }
 
-    private static func streamAddonName(for manifestURL: URL) -> String {
+    static func streamAddonName(for manifestURL: URL) -> String {
         guard let host = manifestURL.host?.replacingOccurrences(of: "www.", with: ""),
               !host.isEmpty else {
             return "Custom Stream Add-on"
@@ -330,6 +385,14 @@ private struct StremioStreamAddon {
         manifestURL
             .deletingLastPathComponent()
             .appendingPathComponent("stream")
+            .appendingPathComponent(type)
+            .appendingPathComponent("\(id).json")
+    }
+
+    func metaURL(type: String, id: String) -> URL {
+        manifestURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("meta")
             .appendingPathComponent(type)
             .appendingPathComponent("\(id).json")
     }

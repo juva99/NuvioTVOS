@@ -126,6 +126,13 @@ public class ProfileManager {
         saveProfiles(profiles)
     }
 
+    public func updateProfileAvatar(id: String, avatarId: String) throws {
+        var profiles = (try? getProfiles()) ?? []
+        guard let index = profiles.firstIndex(where: { $0.id == id }) else { return }
+        profiles[index].avatarId = avatarId
+        saveProfiles(profiles)
+    }
+
     public func replaceProfiles(_ profiles: [Profile]) throws {
         saveProfiles(profiles)
         if let activeId = UserDefaults.standard.string(forKey: Self.activePinKey),
@@ -278,10 +285,10 @@ public class ProfileViewModel: ObservableObject {
         }
     }
 
-    public func createProfile(name: String, pin: String?) {
+    public func createProfile(name: String, pin: String?, avatarId: String = "default") {
         guard let manager = profileManager else { return }
         isLoading = true
-        let input = CreateProfileInput(name: name, profileType: .adult, avatarId: "default", pin: pin)
+        let input = CreateProfileInput(name: name, profileType: .adult, avatarId: avatarId, pin: pin)
         Task {
             do {
                 let newProfile = try manager.createProfile(input: input)
@@ -294,6 +301,33 @@ public class ProfileViewModel: ObservableObject {
                 print("Failed to create profile: \(error)")
                 isLoading = false
             }
+        }
+    }
+
+    public func updateActiveProfileAvatar(_ avatarId: String) {
+        guard let id = activeProfile?.id else { return }
+        updateProfileAvatar(id: id, avatarId: avatarId)
+    }
+
+    public func updateProfileAvatar(id: String, avatarId: String) {
+        guard !avatarId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        guard let manager = profileManager else {
+            if let index = profiles.firstIndex(where: { $0.id == id }) {
+                profiles[index].avatarId = avatarId
+                if activeProfile?.id == id {
+                    activeProfile = profiles[index]
+                }
+            }
+            return
+        }
+
+        do {
+            try manager.updateProfileAvatar(id: id, avatarId: avatarId)
+            loadProfiles()
+            loadActiveProfile()
+        } catch {
+            print("Failed to update profile avatar: \(error)")
         }
     }
 
@@ -336,6 +370,44 @@ public class ProfileViewModel: ObservableObject {
         } catch {
             print("Failed to apply remote profiles: \(error)")
         }
+    }
+
+    public func resetForSignedOut() {
+        let guest = Profile(
+            id: "guest",
+            name: "Nuvio Guest",
+            isPinProtected: false,
+            isAdmin: true,
+            avatarId: "default"
+        )
+        // Collect ids before replacing the profile list so their settings
+        // suites can be deleted below.
+        let previousIds = ((try? profileManager?.getProfiles()) ?? profiles).map(\.id)
+        do {
+            try profileManager?.replaceProfiles([guest])
+        } catch {
+            print("Failed to reset signed-out profile: \(error)")
+        }
+        profiles = [guest]
+        activeProfile = nil
+
+        // Sign-out is a full local reset: no watch history, watched marks,
+        // library items, add-ons, API keys, or preferences may survive into
+        // the next session. Remote data stays on the account — the sync
+        // manager is already detached (auth state is signed out), so these
+        // deletions never push to the server.
+        ContinueWatchingStore.eraseAllProfiles()
+        LibraryStore.eraseAllProfiles()
+        WatchedStore.eraseAllProfiles()
+        // Cover the whole local id space (1-6 + guest), not just the current
+        // list, so suites left behind by previously deleted profiles go too.
+        ProfileSettings.eraseAll(profileIds: previousIds + (1...6).map(String.init) + [guest.id])
+        NuvioSyncManager.eraseProfileIndexBindings()
+
+        ContinueWatchingStore.setActiveProfile(nil)
+        LibraryStore.setActiveProfile(nil)
+        WatchedStore.setActiveProfile(nil)
+        ProfileSettings.clearActiveProfile()
     }
 }
 

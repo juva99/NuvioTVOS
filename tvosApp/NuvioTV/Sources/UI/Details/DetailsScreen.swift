@@ -1018,7 +1018,7 @@ struct TvDetailsContent: View {
     var body: some View {
         if let meta = uiState.meta {
             let episodes = sortedEpisodes(meta)
-            let firstEpisode = firstPlayableEpisode(episodes)
+            let playTarget = playTarget(for: meta, episodes: episodes)
 
             GeometryReader { proxy in
                 ZStack(alignment: .topLeading) {
@@ -1033,12 +1033,12 @@ struct TvDetailsContent: View {
                                 TvDetailsActionRow(
                                     isInWatchlist: uiState.isInWatchlist,
                                     isWatched: uiState.isWatched,
-                                    playTitle: playTitle(firstEpisode),
+                                    playTitle: playTarget.label,
                                     onPlayClick: {
-                                        // For a series the primary button plays the first
-                                        // episode; movies fall through to the stream picker.
-                                        if let firstEpisode {
-                                            onEpisodeSelected(firstEpisode)
+                                        // Series: play the resume/next-up episode; movies
+                                        // fall through to the stream picker.
+                                        if let episode = playTarget.episode {
+                                            onEpisodeSelected(episode)
                                         } else {
                                             onPlayClick()
                                         }
@@ -1054,8 +1054,10 @@ struct TvDetailsContent: View {
 
                                 if !episodes.isEmpty {
                                     TvDetailsEpisodes(
+                                        metaId: meta.id,
                                         episodes: episodes,
                                         seriesRating: meta.rating,
+                                        continueItem: ContinueWatchingStore.item(for: meta.id),
                                         onFocus: {
                                             withAnimation(.easeOut(duration: 0.24)) {
                                                 scrollProxy.scrollTo(TvDetailsScrollID.episodesSection, anchor: .top)
@@ -1119,9 +1121,33 @@ struct TvDetailsContent: View {
         episodes.first(where: { $0.season > 0 }) ?? episodes.first
     }
 
-    private func playTitle(_ episode: NuvioVideo?) -> String {
-        guard let episode else { return "Play" }
-        return "Play S\(episode.season) E\(episode.episode)"
+    /// Primary-button target: resume the in-progress episode, advance to the
+    /// next one after a finished episode, or start from the first playable one.
+    /// Movies have no episode; the label alone flips between Play and Resume.
+    private func playTarget(for meta: NuvioMeta, episodes: [NuvioVideo]) -> (episode: NuvioVideo?, label: String) {
+        let continueItem = ContinueWatchingStore.item(for: meta.id)
+
+        guard !episodes.isEmpty else {
+            return (nil, continueItem == nil ? "Play" : "Resume")
+        }
+
+        if let continueItem,
+           let numbers = continueItem.episodeNumbers,
+           let target = episodes.first(where: { $0.season == numbers.season && $0.episode == numbers.episode }) {
+            let verb = continueItem.isUpNextEntry ? "Next" : "Resume"
+            return (target, "\(verb) S\(target.season) E\(target.episode)")
+        }
+
+        // No progress entry (e.g. the episode just finished): continue with the
+        // first episode that hasn't been watched yet.
+        let watched = WatchedStore.watchedEpisodeKeys(metaId: meta.id)
+        if !watched.isEmpty,
+           let next = episodes.first(where: { $0.season > 0 && !watched.contains("\($0.season):\($0.episode)") }) {
+            return (next, "Next S\(next.season) E\(next.episode)")
+        }
+
+        let first = firstPlayableEpisode(episodes)
+        return (first, first.map { "Play S\($0.season) E\($0.episode)" } ?? "Play")
     }
 
     private func seasonSortKey(_ season: Int) -> Int {
@@ -1549,32 +1575,43 @@ private struct TvDetailsPersonCard: View {
 // MARK: - Series episodes
 
 private struct TvDetailsEpisodes: View {
+    let metaId: String
     let episodes: [NuvioVideo]
     let seriesRating: Double?
+    let continueItem: ContinueWatchingItem?
     let onFocus: () -> Void
     let onSelect: (NuvioVideo) -> Void
 
     @State private var selectedSeason: Int
     @State private var episodeScrollIndex = 0
+    @State private var watchedEpisodeKeys: Set<String>
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
 
     init(
+        metaId: String,
         episodes: [NuvioVideo],
         seriesRating: Double?,
+        continueItem: ContinueWatchingItem?,
         onFocus: @escaping () -> Void,
         onSelect: @escaping (NuvioVideo) -> Void
     ) {
+        self.metaId = metaId
         self.episodes = episodes
         self.seriesRating = seriesRating
+        self.continueItem = continueItem
         self.onFocus = onFocus
         self.onSelect = onSelect
         _selectedSeason = State(initialValue: Self.defaultSeason(episodes))
+        _watchedEpisodeKeys = State(initialValue: WatchedStore.watchedEpisodeKeys(metaId: metaId))
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 30) {
             seasonSelector
             episodeCardStrip
+        }
+        .onReceive(NotificationCenter.default.publisher(for: WatchedStore.changedNotification)) { _ in
+            watchedEpisodeKeys = WatchedStore.watchedEpisodeKeys(metaId: metaId)
         }
     }
 
@@ -1588,6 +1625,8 @@ private struct TvDetailsEpisodes: View {
                     TvEpisodeCard(
                         video: video,
                         fallbackRating: seriesRating,
+                        continueProgress: continueProgress(for: video),
+                        isWatched: watchedEpisodeKeys.contains("\(video.season):\(video.episode)"),
                         onFocus: {
                             if let index = seasonEpisodes.firstIndex(where: { $0.id == video.id }) {
                                 episodeScrollIndex = index
@@ -1669,11 +1708,22 @@ private struct TvDetailsEpisodes: View {
     private func seasonSortKey(_ season: Int) -> Int {
         Self.seasonSortKey(season)
     }
+
+    private func continueProgress(for video: NuvioVideo) -> Double? {
+        guard let continueItem,
+              !continueItem.isUpNextEntry,
+              let numbers = continueItem.episodeNumbers,
+              numbers.season == video.season,
+              numbers.episode == video.episode else {
+            return nil
+        }
+        return continueItem.progress
+    }
 }
 
 private enum TvEpisodeCardLayout {
-    static let width: CGFloat = 560
-    static let height: CGFloat = 520
+    static let width: CGFloat = 660
+    static let height: CGFloat = 430
     static let spacing: CGFloat = 40
     static let verticalPadding: CGFloat = 28
     static let stripHeight: CGFloat = height + verticalPadding * 2
@@ -1712,6 +1762,8 @@ private struct TvSeasonPill: View {
 private struct TvEpisodeCard: View {
     let video: NuvioVideo
     let fallbackRating: Double?
+    let continueProgress: Double?
+    let isWatched: Bool
     let onFocus: () -> Void
     let action: () -> Void
 
@@ -1779,8 +1831,15 @@ private struct TvEpisodeCard: View {
                         }
                     }
                 }
-                .padding(24)
+                .padding(EdgeInsets(top: 24, leading: 24, bottom: continueProgress == nil ? 24 : 44, trailing: 24))
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+
+                continueProgressOverlay
+
+                if isWatched {
+                    watchedBadge
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
+                }
             }
             .frame(width: cardWidth, height: cardHeight)
             .background(
@@ -1804,6 +1863,24 @@ private struct TvEpisodeCard: View {
         }
     }
 
+    /// Same green check as the poster-grid watched badge, scaled for the card.
+    private var watchedBadge: some View {
+        Image(systemName: "checkmark")
+            .font(.system(size: 18, weight: .bold))
+            .foregroundColor(.white)
+            .frame(width: 38, height: 38)
+            .background(
+                Circle()
+                    .fill(Color(red: 0.10, green: 0.68, blue: 0.34))
+            )
+            .overlay(
+                Circle()
+                    .stroke(Color.white.opacity(0.45), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
+            .padding(16)
+    }
+
     private var episodeArtwork: some View {
         Group {
             if let thumb = video.thumbnail, let url = URL(string: thumb) {
@@ -1820,6 +1897,31 @@ private struct TvEpisodeCard: View {
         }
         .frame(width: cardWidth, height: cardHeight)
         .clipped()
+    }
+
+    @ViewBuilder
+    private var continueProgressOverlay: some View {
+        if let continueProgress {
+            let progress = CGFloat(min(max(continueProgress, 0), 1))
+            GeometryReader { geo in
+                let width = max(0, geo.size.width - 48)
+
+                VStack {
+                    Spacer()
+                    ZStack(alignment: .leading) {
+                        Capsule()
+                            .fill(Color.white.opacity(0.36))
+                            .frame(width: width, height: 8)
+
+                        Capsule()
+                            .fill(Color.white)
+                            .frame(width: max(8, width * progress), height: 8)
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 20)
+                }
+            }
+        }
     }
 
     private var thumbnail: some View {

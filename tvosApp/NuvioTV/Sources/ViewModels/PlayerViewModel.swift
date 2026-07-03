@@ -40,6 +40,10 @@ class PlayerViewModel: ObservableObject {
     private var didShutdown = false
     private var activeMeta: NuvioMeta?
     private var activeStreamURL: String?
+    /// Episode being played, parsed from the subtitle line ("S1 · E3 · Title")
+    /// DetailsScreen builds; nil for movies/trailers. Persisted with Continue
+    /// Watching so the Home hero can say which episode is in progress.
+    private var activeEpisodeNumbers: (season: Int, episode: Int)?
     private var pendingResumeSeconds: Double?
     private var didApplyResume = false
     private var pendingExternalSubtitles: [NuvioSubtitle] = []
@@ -78,6 +82,10 @@ class PlayerViewModel: ObservableObject {
         self.status = .buffering
         self.activeMeta = meta
         self.activeStreamURL = url.absoluteString
+        self.activeEpisodeNumbers = isTrailerPlayback
+            ? nil
+            : Self.episodeNumbers(fromSubtitle: subtitle)
+                ?? Self.episodeNumbers(fromStreamURL: url.absoluteString, isSeries: meta.isSeries)
         self.pendingResumeSeconds = isTrailerPlayback ? nil : resumeFrom
         self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
         self.didDetectReplacementStream = false
@@ -154,9 +162,13 @@ class PlayerViewModel: ObservableObject {
         addPendingExternalSubtitlesIfNeeded()
 
         if c.isPlayerEnded {
-            if let activeMeta, subtitle != PlaybackMarkers.trailerSubtitle {
+            // Only a genuine watch-through counts. A stream that dies early
+            // (expired link, decode error) also reports "ended", and that must
+            // neither mark the title watched nor wipe the resume point.
+            if let activeMeta, subtitle != PlaybackMarkers.trailerSubtitle,
+               time.duration >= 60, time.current / time.duration >= 0.85 {
                 ContinueWatchingStore.remove(metaId: activeMeta.id)
-                WatchedStore.markWatched(activeMeta)
+                markWatchedIfNeeded()
             }
         } else {
             saveProgressIfNeeded()
@@ -392,9 +404,57 @@ class PlayerViewModel: ObservableObject {
             meta: activeMeta,
             streamUrl: activeStreamURL,
             position: time.current,
-            duration: time.duration
+            duration: time.duration,
+            season: activeEpisodeNumbers?.season,
+            episode: activeEpisodeNumbers?.episode
         )
         lastProgressSave = Date()
+
+        // "Almost finished" already counts as watched, so the checkmark lands
+        // without sitting through the credits.
+        if time.duration >= 60, time.current / time.duration >= 0.92 {
+            markWatchedIfNeeded()
+        }
+    }
+
+    /// Marks the current playback watched — the specific episode for series,
+    /// the title itself for movies. Skips if already marked so repeated ticks
+    /// past the threshold don't rewrite the store.
+    private func markWatchedIfNeeded() {
+        guard let activeMeta else { return }
+        let season = activeEpisodeNumbers?.season
+        let episode = activeEpisodeNumbers?.episode
+        if let season, let episode {
+            guard !WatchedStore.containsEpisode(metaId: activeMeta.id, season: season, episode: episode) else {
+                return
+            }
+        } else {
+            guard !WatchedStore.contains(metaId: activeMeta.id, type: activeMeta.type) else { return }
+        }
+        WatchedStore.markWatched(activeMeta, season: season, episode: episode)
+    }
+
+    /// Extracts "S1 · E3" from the episode subtitle DetailsScreen passes along
+    /// (see `pendingEpisodeSubtitle`). Movies use an empty subtitle → nil.
+    private static func episodeNumbers(fromSubtitle subtitle: String) -> (season: Int, episode: Int)? {
+        guard let match = subtitle.range(of: #"^S(\d+) · E(\d+)"#, options: .regularExpression) else {
+            return nil
+        }
+        let numbers = subtitle[match]
+            .components(separatedBy: CharacterSet.decimalDigits.inverted)
+            .filter { !$0.isEmpty }
+            .compactMap { Int($0) }
+        guard numbers.count == 2 else { return nil }
+        return (numbers[0], numbers[1])
+    }
+
+    /// Fallback for series resumes that predate episode tracking (their entry
+    /// carries no episode, and the resume path can't say which one it was):
+    /// series stream URLs are release filenames, which almost always carry an
+    /// "S01E03"-style tag.
+    private static func episodeNumbers(fromStreamURL url: String, isSeries: Bool) -> (season: Int, episode: Int)? {
+        guard isSeries else { return nil }
+        return EpisodeTagResolver.episodeNumbers(in: url)
     }
 
     // MARK: - Expired-link / replacement-stream detection

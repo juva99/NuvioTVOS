@@ -71,6 +71,7 @@ enum SettingsKey {
     static let debridProvider = "nuvio.tv.settings.integrations.debridProvider"
     static let debridApiKey = "nuvio.tv.settings.integrations.debridApiKey"
     static let streamAddonManifestURL = "nuvio.tv.settings.integrations.streamAddonManifestURL"
+    static let streamAddonManifestURLs = "nuvio.tv.settings.integrations.streamAddonManifestURLs"
 
     static let playerEngine = "nuvio.tv.settings.playback.playerEngine"
     static let externalPlayer = "nuvio.tv.settings.playback.externalPlayer"
@@ -100,7 +101,7 @@ enum SettingsKey {
         homeLayout, heroEnabled, posterLabels, catalogAddonNames, discoverLocation,
         continueWatchingSort, hideUnreleased, showFullDates,
         traktConnected, tmdbEnabled, tmdbApiKey, mdbListEnabled, mdbListApiKey,
-        debridProvider, debridApiKey, streamAddonManifestURL,
+        debridProvider, debridApiKey, streamAddonManifestURL, streamAddonManifestURLs,
         playerEngine, externalPlayer, smartStreamSelection, smartStreamQuality, smartSubtitleMatching,
         autoPlayNext, trailersEnabled, trailerDelay, audioLanguage,
         subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
@@ -379,6 +380,14 @@ extension View {
         environment(\.settingsEntryLocked, false)
     }
 
+    /// Conditional variant: anchors only when `isActive`, otherwise leaves the
+    /// inherited lock untouched. For panes whose first focusable row changes
+    /// (e.g. Account & Profiles swaps its first row for a non-focusable info
+    /// row when signed out).
+    func settingsEntryAnchor(_ isActive: Bool) -> some View {
+        modifier(ConditionalSettingsEntryAnchor(isActive: isActive))
+    }
+
     /// Disables this focusable row whenever the pane is entry-locked (focus still
     /// in the sidebar), reading the flag from the environment so call sites don't
     /// have to thread it. Composes with any other `.disabled(...)` on the row.
@@ -394,7 +403,35 @@ private struct EntryLockable: ViewModifier {
     }
 }
 
+private struct ConditionalSettingsEntryAnchor: ViewModifier {
+    let isActive: Bool
+    @Environment(\.settingsEntryLocked) private var locked
+    func body(content: Content) -> some View {
+        content.environment(\.settingsEntryLocked, isActive ? false : locked)
+    }
+}
+
 struct SettingsView: View {
+    let activeProfile: Profile?
+    let accountEmail: String?
+    let isAuthenticated: Bool
+    let onSignIn: (() -> Void)?
+    let onSignOut: (() -> Void)?
+
+    init(
+        activeProfile: Profile? = nil,
+        accountEmail: String? = nil,
+        isAuthenticated: Bool = false,
+        onSignIn: (() -> Void)? = nil,
+        onSignOut: (() -> Void)? = nil
+    ) {
+        self.activeProfile = activeProfile
+        self.accountEmail = accountEmail
+        self.isAuthenticated = isAuthenticated
+        self.onSignIn = onSignIn
+        self.onSignOut = onSignOut
+    }
+
     @State private var selectedCategory: SettingsCategory = .account
     @State private var isSubtitleLanguagePickerPresented = false
     @FocusState private var focusedCategory: SettingsCategory?
@@ -539,7 +576,14 @@ struct SettingsView: View {
     private var selectedCategoryContent: some View {
         switch selectedCategory {
         case .account:
-            AccountSettingsView(accentColor: accentColor)
+            AccountSettingsView(
+                accentColor: accentColor,
+                activeProfile: activeProfile,
+                accountEmail: accountEmail,
+                isAuthenticated: isAuthenticated,
+                onSignIn: onSignIn,
+                onSignOut: onSignOut
+            )
         case .appearance:
             AppearanceSettingsView(accentColor: accentColor)
         case .layout:
@@ -634,6 +678,11 @@ private struct SettingsCategoryPillBackground: ViewModifier {
 
 private struct AccountSettingsView: View {
     let accentColor: Color
+    let activeProfile: Profile?
+    let accountEmail: String?
+    let isAuthenticated: Bool
+    let onSignIn: (() -> Void)?
+    let onSignOut: (() -> Void)?
 
     @AppStorage(SettingsKey.profileName) private var profileName = "Nuvio User"
     @AppStorage(SettingsKey.profilePinEnabled) private var pinEnabled = false
@@ -654,7 +703,7 @@ private struct AccountSettingsView: View {
                         )
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text(profileName.isEmpty ? "Nuvio User" : profileName)
+                        Text(displayProfileName)
                             .font(.system(size: 28, weight: .bold))
                             .foregroundColor(.white)
                             .lineLimit(1)
@@ -668,20 +717,28 @@ private struct AccountSettingsView: View {
                 }
                 .padding(.bottom, 6)
 
-                SettingsTextFieldRow(
-                    title: "Profile Name",
-                    subtitle: "Used by the local tvOS profile header",
-                    placeholder: "Nuvio User",
-                    text: $profileName
-                )
-                .settingsEntryAnchor()
+                if isAuthenticated {
+                    SettingsTextFieldRow(
+                        title: "Local Fallback Name",
+                        subtitle: "Used only before a synced profile name is available",
+                        placeholder: "Nuvio User",
+                        text: $profileName
+                    )
+                    .settingsEntryAnchor()
+                } else {
+                    SettingsInfoRow(title: "Local Fallback Name", value: "Nuvio Guest")
+                }
 
+                // When signed out the row above is a non-focusable info row, so
+                // the entry anchor moves here — otherwise the entry lock leaves
+                // the pane with no focusable row and it can't be entered at all.
                 SettingsToggleRow(
                     title: "PIN Protection",
                     subtitle: "Require the profile PIN before opening protected profiles",
                     isOn: $pinEnabled,
                     accentColor: accentColor
                 )
+                .settingsEntryAnchor(!isAuthenticated)
 
                 SettingsToggleRow(
                     title: "Open Last Profile",
@@ -691,19 +748,54 @@ private struct AccountSettingsView: View {
                 )
             }
 
-            SettingsGroup(title: "Account", subtitle: "Sync choices kept locally until account services are connected") {
+            SettingsGroup(title: "Nuvio Account", subtitle: "Connected account and sync controls") {
+                SettingsInfoRow(title: "Status", value: isAuthenticated ? "Signed In" : "Not Signed In")
+
+                if let accountEmail, !accountEmail.isEmpty {
+                    SettingsInfoRow(title: "Email", value: accountEmail)
+                }
+
                 SettingsToggleRow(
                     title: "Sync Watched State",
                     subtitle: "Keep watched history, resume points, and library state eligible for sync",
                     isOn: $syncWatchState,
                     accentColor: accentColor
                 )
+
+                if isAuthenticated {
+                    SettingsActionRow(
+                        title: "Sign Out",
+                        subtitle: "Remove this Nuvio account from this Apple TV",
+                        value: "Disconnect",
+                        accentColor: Color(red: 1.0, green: 0.43, blue: 0.43)
+                    ) {
+                        onSignOut?()
+                    }
+                    .opacity(onSignOut != nil ? 1 : 0.46)
+                    .disabled(onSignOut == nil)
+                } else {
+                    SettingsActionRow(
+                        title: "Sign In",
+                        subtitle: "Connect a Nuvio account to sync profiles, add-ons, and progress",
+                        value: "Connect",
+                        accentColor: accentColor
+                    ) {
+                        onSignIn?()
+                    }
+                    .opacity(onSignIn != nil ? 1 : 0.46)
+                    .disabled(onSignIn == nil)
+                }
             }
         }
     }
 
+    private var displayProfileName: String {
+        guard isAuthenticated else { return "Nuvio Guest" }
+        return ProfileDisplayName.resolve(profile: activeProfile, settingsName: profileName)
+    }
+
     private var profileInitial: String {
-        let trimmedName = profileName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedName = displayProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
         return String((trimmedName.first ?? "N")).uppercased()
     }
 }
@@ -1351,7 +1443,7 @@ private struct SubtitlePreviewCard: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .frame(height: 320)
+        .frame(height: 220)
         .frame(maxWidth: .infinity)
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
@@ -1399,11 +1491,11 @@ private struct SubtitleColorRow: View {
     let accentColor: Color
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
+        HStack(spacing: 20) {
             SettingsRowText(title: title, subtitle: subtitle)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            HStack(spacing: 14) {
+            HStack(spacing: 12) {
                 ForEach(SubtitlePalette.colors, id: \.self) { hex in
                     SubtitleColorSwatchButton(
                         hex: hex,
@@ -1413,16 +1505,16 @@ private struct SubtitleColorRow: View {
                         selection = hex
                     }
                 }
-                Spacer(minLength: 0)
             }
+            .fixedSize(horizontal: true, vertical: false)
         }
         .padding(.horizontal, 20)
-        .padding(.vertical, 16)
+        .frame(minHeight: 74)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .modifier(SettingsSearchGlassBackground(filled: false, shape: RoundedRectangle(cornerRadius: 28, style: .continuous)))
+        .settingsGlass(shape: RoundedRectangle(cornerRadius: 24, style: .continuous), isProminent: false)
         .overlay(
-            RoundedRectangle(cornerRadius: 28, style: .continuous)
-                .strokeBorder(Color.white.opacity(0.12), lineWidth: 1)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(0.10), lineWidth: 1)
         )
     }
 }
@@ -1439,7 +1531,7 @@ private struct SubtitleColorSwatchButton: View {
         Button(action: action) {
             Circle()
                 .fill(Color(hex: hex))
-                .frame(width: 48, height: 48)
+                .frame(width: 40, height: 40)
                 .overlay(
                     Circle()
                         .strokeBorder(Color.white.opacity(0.16), lineWidth: 1)
@@ -1755,7 +1847,9 @@ private struct AddonsSettingsSection: View {
     let accentColor: Color
 
     @AppStorage(SettingsKey.streamAddonManifestURL) private var streamAddonManifestURL = ""
+    @AppStorage(SettingsKey.streamAddonManifestURLs) private var streamAddonManifestURLs = ""
     @State private var addons: [AddonItem] = AddonItem.defaults
+    @State private var syncedAddons: [SyncedAddon] = []
 
     var body: some View {
         SettingsGroup(title: "Add-ons", subtitle: "Stremio-compatible catalog and stream sources") {
@@ -1768,12 +1862,54 @@ private struct AddonsSettingsSection: View {
             )
             .settingsEntryAnchor()
 
+            ForEach(syncedAddons) { addon in
+                SyncedAddonSettingsRow(addon: addon, accentColor: accentColor)
+            }
+
             ForEach($addons) { $addon in
-                AddonSettingsRow(addon: addon, accentColor: accentColor) {
-                    toggle(addon)
+                if !isCoveredBySyncedAddon(addon) {
+                    AddonSettingsRow(addon: addon, accentColor: accentColor) {
+                        toggle(addon)
+                    }
                 }
             }
         }
+        .task(id: streamAddonManifestURL + "\n" + streamAddonManifestURLs) {
+            await loadSyncedAddons()
+        }
+    }
+
+    /// Lists every configured/synced manifest immediately (named by host), then
+    /// upgrades each row with the real name/version/description from its
+    /// manifest as the fetches come back.
+    private func loadSyncedAddons() async {
+        let urls = CinemetaCatalogRepository.configuredStreamAddonManifestURLs
+        var resolved = urls.map { SyncedAddon(url: $0) }
+        syncedAddons = resolved
+
+        for index in resolved.indices {
+            guard !Task.isCancelled else { return }
+            if let manifest = await StremioManifest.fetch(from: resolved[index].url) {
+                resolved[index].apply(manifest)
+                syncedAddons = resolved
+            }
+        }
+    }
+
+    /// Hides a built-in placeholder row when the account sync already provides
+    /// the same addon (matched loosely by name/host, so the synced "Cinemeta"
+    /// covers the built-in Cinemeta row instead of showing a duplicate).
+    private func isCoveredBySyncedAddon(_ addon: AddonItem) -> Bool {
+        let target = Self.normalizedAddonKey(addon.name)
+        guard !target.isEmpty else { return false }
+        return syncedAddons.contains { synced in
+            Self.normalizedAddonKey(synced.name).contains(target)
+                || Self.normalizedAddonKey(synced.url.host ?? "").contains(target)
+        }
+    }
+
+    private static func normalizedAddonKey(_ value: String) -> String {
+        value.lowercased().filter { $0.isLetter || $0.isNumber }
     }
 
     private func toggle(_ addon: AddonItem) {
@@ -1781,6 +1917,101 @@ private struct AddonsSettingsSection: View {
         if let idx = addons.firstIndex(where: { $0.id == addon.id }) {
             addons[idx].isInstalled.toggle()
         }
+    }
+}
+
+/// One add-on synced from the account (or entered manually), shown in the
+/// Add-ons section. Starts with just the manifest URL; name/version/description
+/// arrive once the manifest is fetched.
+private struct SyncedAddon: Identifiable {
+    let url: URL
+    var name: String
+    var version: String?
+    var description: String?
+
+    var id: String { url.absoluteString }
+
+    init(url: URL) {
+        self.url = url
+        self.name = CinemetaCatalogRepository.streamAddonName(for: url)
+    }
+
+    mutating func apply(_ manifest: StremioManifest) {
+        if let manifestName = manifest.name?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !manifestName.isEmpty {
+            name = manifestName
+        }
+        version = manifest.version
+        description = manifest.description
+    }
+
+    var subtitle: String {
+        let trimmed = description?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        return trimmed.isEmpty ? (url.host ?? url.absoluteString) : trimmed
+    }
+}
+
+struct StremioManifest: Decodable {
+    let name: String?
+    let version: String?
+    let description: String?
+
+    static func fetch(from manifestURL: URL) async -> StremioManifest? {
+        guard let (data, response) = try? await URLSession.shared.data(from: manifestURL),
+              let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
+            return nil
+        }
+        return try? JSONDecoder().decode(StremioManifest.self, from: data)
+    }
+}
+
+private struct SyncedAddonSettingsRow: View {
+    let addon: SyncedAddon
+    let accentColor: Color
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: {}) {
+            SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                Image(systemName: "arrow.triangle.2.circlepath")
+                    .font(.system(size: 26))
+                    .foregroundColor(accentColor)
+                    .frame(width: 48, height: 48)
+
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 8) {
+                        Text(addon.name)
+                            .font(.system(size: 22, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        if let version = addon.version, !version.isEmpty {
+                            Text("v\(version)")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(.white.opacity(0.4))
+                        }
+                        Text("Synced")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundColor(accentColor)
+                    }
+                    Text(addon.subtitle)
+                        .font(.system(size: 16, weight: .medium))
+                        .foregroundColor(.white.opacity(0.56))
+                        .lineLimit(2)
+                }
+
+                Spacer(minLength: 20)
+
+                Text("Active")
+                    .font(.system(size: 18, weight: .bold))
+                    .foregroundColor(.white.opacity(0.7))
+                    .lineLimit(1)
+            }
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .entryLockable()
     }
 }
 
@@ -2342,10 +2573,10 @@ private struct SettingsRowShell<Content: View>: View {
         }
         .padding(.horizontal, 20)
         .frame(minHeight: 74)
-        .modifier(SettingsSearchGlassBackground(filled: false, shape: Capsule()))
+        .settingsGlass(shape: RoundedRectangle(cornerRadius: 24, style: .continuous), isProminent: false)
         .overlay(
-            Capsule()
-                .strokeBorder(isFocused ? Color.white.opacity(0.86) : Color.white.opacity(0.15), lineWidth: isFocused ? 3 : 1)
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(isFocused ? Color.white.opacity(0.86) : Color.white.opacity(0.10), lineWidth: isFocused ? 3 : 1)
         )
         .animation(.easeOut(duration: 0.18), value: isFocused)
     }

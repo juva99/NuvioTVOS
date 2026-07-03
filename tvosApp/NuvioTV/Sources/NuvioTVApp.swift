@@ -260,6 +260,8 @@ struct ContentView: View {
             searchViewModel: searchViewModel,
             libraryViewModel: libraryViewModel,
             homeStore: homeStore,
+            accountEmail: authManager.currentEmail,
+            isAuthenticated: authManager.isAuthenticated,
             onSwitchProfile: {
                 // A fresh profile should get a fresh Home (different Continue
                 // Watching, etc.), so drop the cached catalog.
@@ -268,6 +270,33 @@ struct ContentView: View {
                     selectedTab = .home
                     profileViewModel.activeProfile = nil
                     activeScreen = .profileSelection
+                }
+            },
+            onChangeProfileAvatar: { avatarId in
+                profileViewModel.updateActiveProfileAvatar(avatarId)
+            },
+            onSignIn: {
+                authManager.requireLogin()
+                homeStore.reset()
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    selectedTab = .home
+                    profileViewModel.activeProfile = nil
+                    activeScreen = .login
+                }
+            },
+            onSignOut: {
+                // Order matters: signOut() flips auth state first so the sync
+                // manager stops pushing before the local wipe below fires
+                // store-changed notifications.
+                authManager.signOut()
+                profileViewModel.resetForSignedOut()
+                homeStore.reset()
+                searchViewModel.clear()
+                searchViewModel.clearRecent()
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    selectedTab = .home
+                    profileViewModel.activeProfile = nil
+                    activeScreen = .login
                 }
             },
             onNavigateToDetails: { contentId, contentType in
@@ -281,7 +310,9 @@ struct ContentView: View {
                     presentPlayback(
                         url: url,
                         meta: item.meta,
-                        subtitle: "",
+                        // Rebuild the episode line so the player header shows it
+                        // and progress saves keep the episode identity.
+                        subtitle: item.episodeSubtitle ?? "",
                         externalSubtitles: [],
                         resumeFrom: item.resumePosition
                     )
@@ -457,7 +488,12 @@ private struct TVMainTabView: View {
     @ObservedObject var searchViewModel: SearchViewModel
     @ObservedObject var libraryViewModel: LibraryViewModel
     @ObservedObject var homeStore: TVHomeStore
+    let accountEmail: String?
+    let isAuthenticated: Bool
     let onSwitchProfile: () -> Void
+    let onChangeProfileAvatar: (String) -> Void
+    let onSignIn: () -> Void
+    let onSignOut: () -> Void
     let onNavigateToDetails: (String, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
     @AppStorage(SettingsKey.amoled) private var amoled = false
@@ -468,8 +504,8 @@ private struct TVMainTabView: View {
     /// Name shown on the fallback profile tab (tvOS < 27), mirroring the
     /// sidebar header's display-name logic.
     private var profileTabTitle: String {
-        let trimmed = settingsProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? (activeProfile?.name ?? "Nuvio User") : trimmed
+        guard isAuthenticated else { return "Nuvio Guest" }
+        return ProfileDisplayName.resolve(profile: activeProfile, settingsName: settingsProfileName)
     }
 
     var body: some View {
@@ -481,7 +517,7 @@ private struct TVMainTabView: View {
             tabs
                 .tabViewStyle(.sidebarAdaptable)
                 .tabViewSidebarHeader {
-                    TVSidebarProfileHeader(profile: activeProfile, action: onSwitchProfile)
+                    TVSidebarProfileHeader(profile: isAuthenticated ? activeProfile : nil, action: onSwitchProfile)
                 }
         } else if #available(tvOS 18.0, *) {
             tabs
@@ -498,9 +534,16 @@ private struct TVMainTabView: View {
             // The tab label carries the profile name + avatar icon so the menu
             // shows who's signed in instead of a generic "Profile" entry.
             if #unavailable(tvOS 27.0) {
-                TVProfileTabView(profile: activeProfile, onSwitchProfile: onSwitchProfile)
+                TVProfileTabView(
+                    profile: isAuthenticated ? activeProfile : nil,
+                    onSwitchProfile: onSwitchProfile,
+                    onChangeAvatar: onChangeProfileAvatar
+                )
                     .tabItem {
-                        Label(profileTabTitle, systemImage: "person.crop.circle.fill")
+                        Label(
+                            profileTabTitle,
+                            systemImage: ProfileAvatarCatalog.symbolName(for: activeProfile?.avatarId)
+                        )
                     }
                     .tag(TVTab.profile)
             }
@@ -532,7 +575,13 @@ private struct TVMainTabView: View {
                 }
                 .tag(TVTab.library)
 
-            SettingsView()
+            SettingsView(
+                activeProfile: isAuthenticated ? activeProfile : nil,
+                accountEmail: accountEmail,
+                isAuthenticated: isAuthenticated,
+                onSignIn: onSignIn,
+                onSignOut: onSignOut
+            )
                 .tabItem {
                     Label(TVTab.settings.rawValue, systemImage: TVTab.settings.symbol)
                 }
@@ -594,8 +643,7 @@ private struct TVSidebarProfileHeader: View {
     }
 
     private var displayName: String {
-        let trimmed = settingsProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? (profile?.name ?? "Nuvio User") : trimmed
+        ProfileDisplayName.resolve(profile: profile, settingsName: settingsProfileName)
     }
 }
 
@@ -604,31 +652,15 @@ private struct TVSidebarAvatar: View {
     let isFocused: Bool
 
     var body: some View {
-        ZStack {
-            Circle()
-                .fill(Color(red: 1.0, green: 0.82, blue: 0.92))
-
-            Text(initial)
-                .font(.system(size: 20, weight: .heavy))
-                .foregroundColor(Color(red: 0.18, green: 0.12, blue: 0.18))
-        }
-        .frame(width: 44, height: 44)
-        .overlay(
-            Circle()
-                .stroke(Color.white.opacity(0.82), lineWidth: 2)
+        ProfileAvatarView(
+            avatarId: profile?.avatarId ?? ProfileAvatarCatalog.defaultId,
+            size: 44,
+            isFocused: isFocused
         )
         .scaleEffect(isFocused ? 1.12 : 1)
         .offset(y: isFocused ? -3 : 0)
         .shadow(color: .black.opacity(isFocused ? 0.32 : 0), radius: 12, x: 0, y: 8)
         .animation(.spring(response: 0.28, dampingFraction: 0.82), value: isFocused)
-    }
-
-    private var initial: String {
-        guard let first = profile?.name.trimmingCharacters(in: .whitespacesAndNewlines).first else {
-            return "N"
-        }
-
-        return String(first).uppercased()
     }
 }
 
@@ -637,15 +669,21 @@ private struct TVSidebarAvatar: View {
 private struct TVProfileTabView: View {
     let profile: Profile?
     let onSwitchProfile: () -> Void
+    let onChangeAvatar: (String) -> Void
 
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
-    @FocusState private var isFocused: Bool
+    @State private var showingAvatarPicker = false
+    @FocusState private var focusedControl: TVProfileTabFocus?
 
     var body: some View {
         VStack(spacing: 30) {
-            TVSidebarAvatar(profile: profile, isFocused: isFocused)
-                .scaleEffect(2.4)
-                .frame(height: 120)
+            ProfileAvatarView(
+                avatarId: profile?.avatarId ?? ProfileAvatarCatalog.defaultId,
+                size: 124,
+                isFocused: focusedControl == .avatar
+            )
+            .scaleEffect(focusedControl == .avatar ? 1.1 : 1)
+            .animation(.spring(response: 0.28, dampingFraction: 0.82), value: focusedControl)
 
             VStack(spacing: 8) {
                 Text(displayName)
@@ -657,28 +695,83 @@ private struct TVProfileTabView: View {
                     .foregroundColor(.white.opacity(0.6))
             }
 
-            Button(action: onSwitchProfile) {
-                Text("Change Profile")
-                    .font(.system(size: 24, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 44)
-                    .padding(.vertical, 18)
-                    .background(
-                        Capsule().fill(isFocused ? Color.white.opacity(0.22) : Color.white.opacity(0.10))
-                    )
-                    .overlay(
-                        Capsule().strokeBorder(isFocused ? Color.white : Color.white.opacity(0.25), lineWidth: isFocused ? 3 : 1)
-                    )
+            HStack(spacing: 18) {
+                TVProfileActionButton(
+                    title: "Change Avatar",
+                    systemImage: "person.crop.circle",
+                    isFocused: focusedControl == .avatar
+                ) {
+                    showingAvatarPicker = true
+                }
+                .focused($focusedControl, equals: .avatar)
+                .disabled(profile == nil)
+
+                TVProfileActionButton(
+                    title: "Switch Profile",
+                    systemImage: "person.2.fill",
+                    isFocused: focusedControl == .profile
+                ) {
+                    onSwitchProfile()
+                }
+                .focused($focusedControl, equals: .profile)
             }
-            .buttonStyle(.plain)
-            .focused($isFocused)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .sheet(isPresented: $showingAvatarPicker) {
+            ProfileAvatarPickerSheet(
+                isPresented: $showingAvatarPicker,
+                title: displayName,
+                selectedAvatarId: profile?.avatarId ?? ProfileAvatarCatalog.defaultId
+            ) { avatarId in
+                onChangeAvatar(avatarId)
+            }
+        }
     }
 
     private var displayName: String {
-        let trimmed = settingsProfileName.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? (profile?.name ?? "Nuvio User") : trimmed
+        ProfileDisplayName.resolve(profile: profile, settingsName: settingsProfileName)
+    }
+}
+
+enum ProfileDisplayName {
+    static func resolve(profile: Profile?, settingsName: String) -> String {
+        if let profileName = profile?.name.trimmingCharacters(in: .whitespacesAndNewlines),
+           !profileName.isEmpty {
+            return profileName
+        }
+        let trimmed = settingsName.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "Nuvio User" : trimmed
+    }
+}
+
+private enum TVProfileTabFocus: Hashable {
+    case avatar
+    case profile
+}
+
+private struct TVProfileActionButton: View {
+    let title: String
+    let systemImage: String
+    let isFocused: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 24, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .padding(.horizontal, 34)
+                .padding(.vertical, 18)
+                .frame(minWidth: 230)
+                .background(
+                    Capsule().fill(isFocused ? Color.white.opacity(0.22) : Color.white.opacity(0.10))
+                )
+                .overlay(
+                    Capsule().strokeBorder(isFocused ? Color.white : Color.white.opacity(0.25), lineWidth: isFocused ? 3 : 1)
+                )
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -720,6 +813,9 @@ struct TVHomeView: View {
 
     @State private var isLoading = true
     @State private var focusedMeta: NuvioMeta?
+    /// Row the settled focus lives in; the hero only shows Continue Watching
+    /// context (episode line, time left) for cards focused in that row.
+    @State private var focusedSectionId: String?
     @State private var pendingFocusedMeta: NuvioMeta?
     @State private var focusSettleTask: Task<Void, Never>?
     @State private var landscapeFocusedId: String?
@@ -729,6 +825,11 @@ struct TVHomeView: View {
     @State private var errorMessage: String?
     @State private var didRequestInitialCardFocus = false
     @State private var shouldRestoreHomeFocus = false
+    /// Card to actively re-focus once the Details/Player overlay dismisses.
+    /// Captured when the tab view gets disabled (overlay up), consumed when it
+    /// is re-enabled. See `restoreOverlayFocus`.
+    @State private var overlayRestoreCardID: String?
+    @Environment(\.isEnabled) private var isEnabled
     @State private var focusedRowIndex = 0
     @State private var rowTops: [Int: CGFloat] = [:]
     @State private var verticalOffset: CGFloat = 0
@@ -802,7 +903,7 @@ struct TVHomeView: View {
                 } else {
                     // Header Hero Meta block (Static, outside ScrollView)
                     if heroEnabled, let heroMeta = visibleFocusedMeta ?? visibleHero {
-                        TVHeroView(meta: heroMeta) {
+                        TVHeroView(meta: heroMeta, continueItem: heroContinueItem(for: heroMeta)) {
                             onNavigateToDetails(heroMeta.id, heroMeta.type)
                         }
                     }
@@ -827,6 +928,7 @@ struct TVHomeView: View {
                                         initialFocusCardKey: initialFocusCardKey,
                                         landscapeFocusedId: landscapeFocusedId,
                                         externalFocus: $focusedCardID,
+                                        restrictFocusToCardKey: overlayRestoreCardID,
                                         onInitialFocusRequested: {
                                             didRequestInitialCardFocus = true
                                         },
@@ -839,7 +941,7 @@ struct TVHomeView: View {
                                                 focusedRowIndex = index
                                                 verticalOffset = offsetForRow(index)
                                             }
-                                            settleFocus(on: meta)
+                                            settleFocus(on: meta, in: section.id)
                                             scheduleLandscapeFocus(cardKey: "\(section.id)\u{1}\(meta.id)")
                                         },
                                         onBlur: { meta in
@@ -921,9 +1023,42 @@ struct TVHomeView: View {
             if let newValue {
                 store.lastFocusedCardID = newValue
                 shouldRestoreHomeFocus = false
+                // Restoration complete -- lift the focus restriction.
+                if newValue == overlayRestoreCardID { overlayRestoreCardID = nil }
             } else if store.lastFocusedCardID != nil {
                 shouldRestoreHomeFocus = true
             }
+        }
+        // The tab view is `.disabled` while Details/Player covers it. On
+        // dismissal the focus engine re-places focus geometrically (top-left
+        // card) WITHOUT consulting the armed `defaultFocus` -- that only fires
+        // for scoped entries like coming back from the sidebar. So capture the
+        // card when the overlay goes up; while the capture is set every other
+        // card is unfocusable (the Settings sidebar trick), so the engine can
+        // only land back on the saved card -- no scroll-to-top flash.
+        .onChange(of: isEnabled) { enabled in
+            if !enabled {
+                overlayRestoreCardID = focusedCardID ?? store.lastFocusedCardID
+            } else if let target = overlayRestoreCardID {
+                restoreOverlayFocus(to: target)
+            }
+        }
+    }
+
+    /// Nudges focus back to `target` after an overlay dismissal, in case the
+    /// engine parked focus outside the rows (hero, sidebar) while the tab view
+    /// was still fading in. Two attempts because cards are unfocusable at
+    /// near-zero opacity; the trailing clear lifts the card restriction even
+    /// if the saved card no longer exists (e.g. Continue Watching reordered),
+    /// so the rows can never be left permanently unfocusable.
+    private func restoreOverlayFocus(to target: String) {
+        for delay in [0.12, 0.45] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                if overlayRestoreCardID == target { focusedCardID = target }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            if overlayRestoreCardID == target { overlayRestoreCardID = nil }
         }
     }
 
@@ -979,6 +1114,15 @@ struct TVHomeView: View {
 
     private var continueWatchingByMetaId: [String: ContinueWatchingItem] {
         Dictionary(uniqueKeysWithValues: continueWatching.map { ($0.meta.id, $0) })
+    }
+
+    /// Continue Watching context for the hero — only when the focused card is
+    /// actually in the Continue Watching row. The same title can also appear in
+    /// catalog rows (Popular etc.), where the hero should stay generic.
+    private func heroContinueItem(for meta: NuvioMeta) -> ContinueWatchingItem? {
+        guard visibleFocusedMeta != nil,
+              focusedSectionId == TVHomeSection.continueWatchingId else { return nil }
+        return continueWatchingByMetaId[meta.id]
     }
 
     private var visibleHero: NuvioMeta? {
@@ -1068,6 +1212,7 @@ struct TVHomeView: View {
             store.hasLoaded = true
             refreshContinueWatching()
             focusedMeta = loadedSections.first?.items.first
+            focusedSectionId = nil
             pendingFocusedMeta = focusedMeta
             landscapeFocusedId = nil
             pendingLandscapeFocusedId = nil
@@ -1080,7 +1225,7 @@ struct TVHomeView: View {
         }
     }
 
-    private func settleFocus(on meta: NuvioMeta) {
+    private func settleFocus(on meta: NuvioMeta, in sectionId: String) {
         pendingFocusedMeta = meta
         focusSettleTask?.cancel()
 
@@ -1089,11 +1234,14 @@ struct TVHomeView: View {
             try? await Task.sleep(nanoseconds: fastNavigation ? 60_000_000 : 140_000_000)
             guard !Task.isCancelled,
                   pendingFocusedMeta?.id == targetId,
-                  focusedMeta?.id != targetId,
                   let settledMeta = pendingFocusedMeta else {
                 return
             }
 
+            // Same card, possibly reached in a different row: still update the
+            // row so the hero's Continue Watching context follows the focus.
+            focusedSectionId = sectionId
+            guard focusedMeta?.id != targetId else { return }
             focusedMeta = settledMeta
         }
     }
@@ -1217,6 +1365,10 @@ private let TVHomeRowPrefetchThreshold = 6
 
 private struct TVHeroView: View {
     let meta: NuvioMeta
+    /// Continue Watching entry for this title, when one exists. Lets the hero
+    /// say which episode is in progress, how much is left, and show the
+    /// episode's own overview instead of the series blurb.
+    var continueItem: ContinueWatchingItem? = nil
     let onSelect: () -> Void
     @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
 
@@ -1231,9 +1383,15 @@ private struct TVHeroView: View {
                     .foregroundColor(.white)
             }
 
-            TVHeroMetaLine(meta: meta)
+            TVHeroMetaLine(meta: meta, episodeLine: episodeLine)
 
-            if let description = meta.description {
+            if let continueItem {
+                Text(continueItem.isUpNextEntry ? "NEXT UP" : continueItem.remainingText.uppercased())
+                    .font(.custom("Inter-SemiBold", size: 22))
+                    .foregroundColor(.white.opacity(0.66))
+            }
+
+            if let description = heroDescription {
                 Text(description.wrappedEveryNWords(9))
                     .font(.custom("Inter-Regular", size: 24))
                     .foregroundColor(.white)
@@ -1248,6 +1406,21 @@ private struct TVHeroView: View {
         .padding(.top, homeLayout == "Compact" ? 82 : 140)
         .padding(.bottom, 20)
         .frame(height: homeLayout == "Compact" ? 390 : 500, alignment: .bottomLeading)
+    }
+
+    /// "S1 E3 · Title" for the episode in progress; nil for movies or when the
+    /// entry predates episode tracking.
+    private var episodeLine: String? {
+        continueItem?.episodeDisplayLine
+    }
+
+    /// Prefer the in-progress episode's overview; fall back to the series/movie
+    /// description.
+    private var heroDescription: String? {
+        if let overview = continueItem?.episodeVideo?.overview, !overview.isEmpty {
+            return overview
+        }
+        return meta.description
     }
 }
 
@@ -1330,6 +1503,10 @@ private struct TVCatalogRow: View {
     let initialFocusCardKey: String?
     let landscapeFocusedId: String?
     var externalFocus: FocusState<String?>.Binding? = nil
+    /// While non-nil, every card except this key is unfocusable — the Settings
+    /// sidebar trick. Used during overlay-dismiss focus restoration so the
+    /// engine can only land on the saved card, never flashing the first one.
+    var restrictFocusToCardKey: String? = nil
     let onInitialFocusRequested: () -> Void
     let onFocus: (NuvioMeta) -> Void
     let onBlur: (NuvioMeta) -> Void
@@ -1395,6 +1572,10 @@ private struct TVCatalogRow: View {
                         isLandscape: homeLayout == "Modern" && landscapeFocusedId == cardKey,
                         continueProgress: progressItem?.progress,
                         continueRemainingText: progressItem?.remainingText,
+                        continueEpisodeText: progressItem?.episodeLabel,
+                        continueEpisodeTitleText: progressItem?.episodeVideo?.title,
+                        continueIsUpNext: progressItem?.isUpNextEntry == true,
+                        showsWatchedBadge: id != TVHomeSection.continueWatchingId,
                         shouldRequestInitialFocus: shouldRequestInitialFocus,
                         onInitialFocusRequested: shouldRequestInitialFocus ? onInitialFocusRequested : nil,
                         onFocus: { focused in
@@ -1412,6 +1593,7 @@ private struct TVCatalogRow: View {
                     ) {
                         onSelect(item)
                     }
+                    .disabled(restrictFocusToCardKey != nil && restrictFocusToCardKey != cardKey)
                 }
             }
             .padding(.vertical, 28)
@@ -1435,14 +1617,17 @@ private struct TVCatalogRow: View {
 
 private struct TVHeroMetaLine: View {
     let meta: NuvioMeta
+    /// "S1 E3 · Title" for a series in progress; replaces the type/runtime
+    /// items so the line reads "S1 E3 · Title • Crime • 2026–".
+    var episodeLine: String? = nil
     @AppStorage(SettingsKey.showFullDates) private var showFullDates = true
 
     var body: some View {
         let values = [
-            meta.type.capitalized,
+            episodeLine ?? meta.type.capitalized,
             meta.genres?.first,
-            formattedRuntime,
-            releaseDate,
+            episodeLine == nil ? formattedRuntime : nil,
+            episodeLine == nil ? releaseDate : (meta.releaseInfo ?? meta.year.map(String.init)),
             meta.rating.map { String(format: "%.1f IMDb", $0) }
         ].compactMap { $0 }.filter { !$0.isEmpty }
 

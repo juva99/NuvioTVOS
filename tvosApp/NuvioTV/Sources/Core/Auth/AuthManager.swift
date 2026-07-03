@@ -9,6 +9,7 @@
 
 import SwiftUI
 import UIKit
+import Security
 
 @MainActor
 final class AuthManager: ObservableObject {
@@ -99,11 +100,25 @@ final class AuthManager: ObservableObject {
         store.didSkipLogin = true
     }
 
+    func requireLogin() {
+        store.didSkipLogin = false
+        if !isAuthenticated {
+            authState = .signedOut
+        }
+    }
+
     func signOut() {
         pollTask?.cancel()
+        let session = store.load()
         store.clear()
+        store.didSkipLogin = false
         clearQrState()
         authState = .signedOut
+        Task {
+            if let accessToken = session?.accessToken {
+                try? await service.signOut(accessToken: accessToken)
+            }
+        }
     }
 
     // MARK: - Email
@@ -196,13 +211,15 @@ final class AuthManager: ObservableObject {
             switch result.status.lowercased() {
             case "approved":
                 qrStatusMessage = "Login approved. Finishing sign in…"
-                pollTask?.cancel()
                 await exchange(code: code, nonce: nonce, anon: anon)
+                pollTask?.cancel()
+                pollTask = nil
             case "pending":
                 qrStatusMessage = "Waiting for approval on your phone…"
             case "expired", "used", "cancelled":
                 qrStatusMessage = "QR login expired. Generate a new code."
                 pollTask?.cancel()
+                pollTask = nil
             default:
                 qrStatusMessage = "Status: \(result.status)"
             }
@@ -240,7 +257,7 @@ final class AuthManager: ObservableObject {
     @discardableResult
     private func ensureConfigured() -> Bool {
         if AuthConfig.isConfigured { return true }
-        errorMessage = "Account backend isn't configured yet. Add your Supabase URL and anon key in AuthConfig.swift."
+        errorMessage = "Account backend isn't configured yet. Add the Nuvio API URL and publishable key in AuthConfig.swift."
         return false
     }
 
@@ -273,30 +290,84 @@ final class AuthManager: ObservableObject {
     }
 }
 
-/// UserDefaults-backed session persistence. Tokens would ideally live in the
-/// Keychain; UserDefaults matches the rest of this prototype's storage and is
-/// isolated here so it can be swapped later.
+/// Keychain-backed session persistence. The old UserDefaults key is migrated
+/// once so existing installs do not lose a session when upgrading.
 private struct SessionStore {
-    private let sessionKey = "nuvio.auth.session"
+    private let legacySessionKey = "nuvio.auth.session"
     private let skipKey = "nuvio.auth.skippedLogin"
+    private let keychainService = "com.nuvio.app.tv.auth"
+    private let keychainAccount = "session"
     private let defaults = UserDefaults.standard
 
     func load() -> AuthSession? {
-        guard let data = defaults.data(forKey: sessionKey) else { return nil }
-        return try? JSONDecoder().decode(AuthSession.self, from: data)
+        if let data = loadKeychainData(),
+           let session = try? JSONDecoder().decode(AuthSession.self, from: data) {
+            return session
+        }
+        return migrateLegacySession()
     }
 
     func save(_ session: AuthSession) {
         if let data = try? JSONEncoder().encode(session) {
-            defaults.set(data, forKey: sessionKey)
+            saveKeychainData(data)
         }
         didSkipLogin = false
     }
 
-    func clear() { defaults.removeObject(forKey: sessionKey) }
+    func clear() {
+        deleteKeychainData()
+        defaults.removeObject(forKey: legacySessionKey)
+    }
 
     var didSkipLogin: Bool {
         get { defaults.bool(forKey: skipKey) }
         nonmutating set { defaults.set(newValue, forKey: skipKey) }
+    }
+
+    private func migrateLegacySession() -> AuthSession? {
+        guard let data = defaults.data(forKey: legacySessionKey),
+              let session = try? JSONDecoder().decode(AuthSession.self, from: data) else {
+            return nil
+        }
+        saveKeychainData(data)
+        defaults.removeObject(forKey: legacySessionKey)
+        return session
+    }
+
+    private var keychainQuery: [String: Any] {
+        [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: keychainService,
+            kSecAttrAccount as String: keychainAccount
+        ]
+    }
+
+    private func loadKeychainData() -> Data? {
+        var query = keychainQuery
+        query[kSecReturnData as String] = kCFBooleanTrue
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess else { return nil }
+        return item as? Data
+    }
+
+    private func saveKeychainData(_ data: Data) {
+        var addQuery = keychainQuery
+        addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        addQuery[kSecValueData as String] = data
+
+        let status = SecItemAdd(addQuery as CFDictionary, nil)
+        if status == errSecDuplicateItem {
+            SecItemUpdate(
+                keychainQuery as CFDictionary,
+                [kSecValueData as String: data] as CFDictionary
+            )
+        }
+    }
+
+    private func deleteKeychainData() {
+        SecItemDelete(keychainQuery as CFDictionary)
     }
 }

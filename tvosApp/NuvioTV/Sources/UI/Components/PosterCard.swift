@@ -14,6 +14,12 @@ struct PosterCard: View {
     var isLandscape: Bool = false
     var continueProgress: Double? = nil
     var continueRemainingText: String? = nil
+    var continueEpisodeText: String? = nil
+    var continueEpisodeTitleText: String? = nil
+    /// Fresh next-episode suggestion: the badge reads "Next Up" and the
+    /// progress bar is hidden, since there's no real playback position yet.
+    var continueIsUpNext: Bool = false
+    var showsWatchedBadge: Bool = true
     var shouldRequestInitialFocus: Bool = false
     var onInitialFocusRequested: (() -> Void)? = nil
     var onFocus: ((NuvioMeta) -> Void)? = nil
@@ -66,7 +72,9 @@ struct PosterCard: View {
                     continueBadge
                 }
                 .overlay(alignment: .topTrailing) {
-                    WatchedCheckmarkBadge(metaId: meta.id, type: meta.type)
+                    if showsWatchedBadge {
+                        WatchedCheckmarkBadge(metaId: meta.id, type: meta.type)
+                    }
                 }
                 .overlay(
                     RoundedRectangle(cornerRadius: cardCornerRadius, style: .continuous)
@@ -141,7 +149,9 @@ struct PosterCard: View {
                 endPoint: .bottom
             )
 
-            if let logoUrl = meta.logoUrl {
+            if continueEpisodeText != nil {
+                continueLandscapeSummary
+            } else if let logoUrl = meta.logoUrl {
                 AsyncImage(url: URL(string: logoUrl)) { phase in
                     if case .success(let image) = phase {
                         image
@@ -161,6 +171,33 @@ struct PosterCard: View {
         }
     }
 
+    private var continueLandscapeSummary: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let continueEpisodeText {
+                Text(continueEpisodeText)
+                    .font(.system(size: 25, weight: .medium))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+            }
+
+            Text(meta.name)
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+                .minimumScaleFactor(0.82)
+
+            if let continueEpisodeTitleText, !continueEpisodeTitleText.isEmpty {
+                Text(continueEpisodeTitleText)
+                    .font(.system(size: 23, weight: .medium))
+                    .foregroundColor(.white.opacity(0.66))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.82)
+            }
+        }
+        .frame(maxWidth: cardWidth * 0.70, alignment: .leading)
+        .padding(EdgeInsets(top: 22, leading: 22, bottom: 54, trailing: 22))
+    }
+
     private var fallbackTitle: some View {
         Text(meta.name)
             .font(.custom("Inter-Bold", size: 34))
@@ -170,24 +207,34 @@ struct PosterCard: View {
 
     @ViewBuilder
     private var continueBadge: some View {
-        if let continueRemainingText {
-            Text(continueRemainingText)
+        if let continueBadgeDisplayText {
+            Text(continueBadgeDisplayText)
                 .font(.system(size: 22, weight: .semibold))
                 .foregroundColor(.white)
                 .lineLimit(1)
+                .minimumScaleFactor(0.65)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 8)
                 .background(
-                    RoundedRectangle(cornerRadius: 10, style: .continuous)
-                        .fill(Color.black.opacity(0.72))
-                )
-                .padding(16)
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.black.opacity(0.72))
+            )
+            .padding(16)
         }
+    }
+
+    private var continueBadgeDisplayText: String? {
+        if continueIsUpNext { return "Next Up" }
+        guard let continueRemainingText else { return nil }
+        if let continueEpisodeText {
+            return "\(continueEpisodeText) • \(continueRemainingText)"
+        }
+        return continueRemainingText
     }
 
     @ViewBuilder
     private var continueProgressOverlay: some View {
-        if let continueProgress {
+        if let continueProgress, !continueIsUpNext {
             let progress = CGFloat(min(max(continueProgress, 0), 1))
             GeometryReader { geo in
                 let width = max(0, geo.size.width - 44)
@@ -369,7 +416,10 @@ struct WatchedCheckmarkBadge: View {
     }
 
     private func refresh() {
-        isWatched = WatchedStore.contains(metaId: metaId, type: type)
+        // Series watched state lives on the episode cards inside Details; the
+        // poster badge is movies-only.
+        let isSeries = ["series", "tv", "show", "tvshow"].contains(type.lowercased())
+        isWatched = !isSeries && WatchedStore.contains(metaId: metaId, type: type)
     }
 }
 

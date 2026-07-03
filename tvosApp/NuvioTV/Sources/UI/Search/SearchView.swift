@@ -14,6 +14,15 @@ struct SearchView: View {
 
     @FocusState private var searchBarFocused: Bool
     @FocusState private var focusedResultID: String?
+    /// Last card focused in the results grid, kept so returning from details
+    /// (which steals focus and nils `focusedResultID`) restores that card
+    /// instead of snapping back to the first result.
+    @State private var lastFocusedResultID: String?
+    @State private var shouldRestoreResultFocus = false
+    /// Card to actively re-focus once the Details overlay dismisses; captured
+    /// when the tab view gets disabled (overlay up), consumed on re-enable.
+    @State private var overlayRestoreResultID: String?
+    @Environment(\.isEnabled) private var isEnabled
     @State private var searchTextInputActive = false
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
@@ -58,6 +67,34 @@ struct SearchView: View {
         .onAppear {
             if !viewModel.hasQuery {
                 DispatchQueue.main.async { searchBarFocused = true }
+            }
+        }
+        .onChange(of: focusedResultID) { newValue in
+            if let newValue {
+                lastFocusedResultID = newValue
+                shouldRestoreResultFocus = false
+                // Restoration complete -- lift the focus restriction.
+                if newValue == overlayRestoreResultID { overlayRestoreResultID = nil }
+            } else if lastFocusedResultID != nil {
+                shouldRestoreResultFocus = true
+            }
+        }
+        // Overlay dismissal re-places focus geometrically without consulting
+        // `defaultFocus`. While `overlayRestoreResultID` is set every other
+        // card is unfocusable, so the engine can only land back on the saved
+        // card -- no scroll-to-top flash. See TVHomeView for the full story.
+        .onChange(of: isEnabled) { enabled in
+            if !enabled {
+                overlayRestoreResultID = focusedResultID ?? lastFocusedResultID
+            } else if let target = overlayRestoreResultID {
+                for delay in [0.12, 0.45] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        if overlayRestoreResultID == target { focusedResultID = target }
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    if overlayRestoreResultID == target { overlayRestoreResultID = nil }
+                }
             }
         }
     }
@@ -182,6 +219,7 @@ struct SearchView: View {
                     SearchResultCard(meta: item, externalFocus: $focusedResultID) {
                         onContentClick(item.id, item.type)
                     }
+                    .disabled(overlayRestoreResultID != nil && overlayRestoreResultID != item.id)
                 }
             }
             .padding(.top, 16)
@@ -190,7 +228,18 @@ struct SearchView: View {
         }
         .scrollClipDisabledIfAvailable()
         .focusSection()
-        .defaultFocusIfAvailable($focusedResultID, viewModel.results.first?.id)
+        .defaultFocusIfAvailable($focusedResultID, defaultResultFocusID)
+    }
+
+    /// Card the grid should focus when it (re)gains focus: the card the user
+    /// left on when armed and still present in the results, else the first one.
+    private var defaultResultFocusID: String? {
+        if shouldRestoreResultFocus,
+           let saved = lastFocusedResultID,
+           viewModel.results.contains(where: { $0.id == saved }) {
+            return saved
+        }
+        return viewModel.results.first?.id
     }
 
     private var gridColumns: [GridItem] {

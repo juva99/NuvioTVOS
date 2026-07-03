@@ -23,6 +23,10 @@ class SearchViewModel: ObservableObject {
     @Published var error: String?
     @Published var selectedType: SearchContentType = .all
     @Published var recentSearches: [String] = []
+    /// Last focused result card, kept here (outside the view, like
+    /// `TVHomeStore.lastFocusedCardID`) so it survives the details push and
+    /// returning restores that card instead of snapping to the first result.
+    var lastFocusedResultID: String?
 
     private let repository: CatalogRepository
     private var allResults: [NuvioMeta] = []

@@ -120,7 +120,7 @@ struct LoginView: View {
             }
 
             if !auth.isBackendConfigured {
-                statusPill("Backend not configured — add Supabase URL & anon key in AuthConfig.swift.", isError: false)
+                statusPill("Backend not configured — add the Nuvio API URL and publishable key in AuthConfig.swift.", isError: false)
             }
 
             Divider().background(Color.white.opacity(0.1)).padding(.vertical, 4)

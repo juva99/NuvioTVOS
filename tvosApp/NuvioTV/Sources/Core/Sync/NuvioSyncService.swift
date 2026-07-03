@@ -160,27 +160,61 @@ final class NuvioSyncManager: ObservableObject {
                 )
             }
 
+            do {
+                let remoteAddons = try await client.pullAddons(
+                    session: session,
+                    remoteProfileId: remoteProfileId
+                )
+                if !remoteAddons.isEmpty {
+                    let appliedCount = client.applyAddons(remoteAddons, localProfileId: activeProfile.id)
+                    print("Nuvio sync pulled \(appliedCount) enabled add-on(s).")
+                }
+            } catch {
+                print("Nuvio add-on sync failed: \(error.localizedDescription)")
+            }
+
+            // Pull each watch-state collection independently so one failing
+            // request (or one undecodable payload) can't abort the others.
+            var pullFailures = 0
             if Self.watchStateSyncEnabled(for: activeProfile.id) {
-                let remoteLibrary = try await client.pullLibrary(
-                    session: session,
-                    remoteProfileId: remoteProfileId
-                )
-                LibraryStore.mergeRemote(remoteLibrary)
+                do {
+                    let remoteLibrary = try await client.pullLibrary(
+                        session: session,
+                        remoteProfileId: remoteProfileId
+                    )
+                    LibraryStore.mergeRemote(remoteLibrary)
+                } catch {
+                    pullFailures += 1
+                    print("Nuvio library sync failed: \(error.localizedDescription)")
+                }
 
-                let remoteWatched = try await client.pullWatched(
-                    session: session,
-                    remoteProfileId: remoteProfileId
-                )
-                WatchedStore.mergeRemote(remoteWatched)
+                do {
+                    let remoteWatched = try await client.pullWatched(
+                        session: session,
+                        remoteProfileId: remoteProfileId
+                    )
+                    WatchedStore.mergeRemote(remoteWatched)
+                } catch {
+                    pullFailures += 1
+                    print("Nuvio watched sync failed: \(error.localizedDescription)")
+                }
 
-                let remoteProgress = try await client.pullWatchProgress(
-                    session: session,
-                    remoteProfileId: remoteProfileId
-                )
-                ContinueWatchingStore.mergeRemote(remoteProgress)
+                do {
+                    let remoteProgress = try await client.pullWatchProgress(
+                        session: session,
+                        remoteProfileId: remoteProfileId
+                    )
+                    ContinueWatchingStore.mergeRemote(remoteProgress)
+                } catch {
+                    pullFailures += 1
+                    print("Nuvio watch progress sync failed: \(error.localizedDescription)")
+                }
             }
             isApplyingRemote = false
 
+            // Enable pushes only after a complete pull; pushing a snapshot built
+            // from a partial pull could overwrite remote state we never saw.
+            guard pullFailures == 0 else { return }
             if let key = currentSyncKey() {
                 completedInitialPullKeys.insert(key)
             }
@@ -213,6 +247,7 @@ final class NuvioSyncManager: ObservableObject {
             try await client.pushLibrary(session: session, remoteProfileId: remoteProfileId)
             try await client.pushWatched(session: session, remoteProfileId: remoteProfileId)
             try await client.pushWatchProgress(session: session, remoteProfileId: remoteProfileId)
+            print("Nuvio sync pushed \(LibraryStore.items().count) library, \(WatchedStore.items().count) watched, \(ContinueWatchingStore.items().count) progress item(s).")
         } catch {
             print("Nuvio sync push failed: \(error.localizedDescription)")
         }
@@ -238,10 +273,23 @@ final class NuvioSyncManager: ObservableObject {
         }
         return true
     }
+
+    /// Removes the persisted local→remote profile-slot bindings. Called on
+    /// sign-out so a future account's profiles don't inherit stale mappings.
+    static func eraseProfileIndexBindings() {
+        ProfileSyncIndexStore.eraseAll()
+    }
 }
 
 private enum ProfileSyncIndexStore {
     private static let prefix = "nuvio.tv.sync.profileIndex."
+
+    static func eraseAll() {
+        let defaults = UserDefaults.standard
+        defaults.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(prefix) }
+            .forEach { defaults.removeObject(forKey: $0) }
+    }
 
     static func remoteId(for profile: Profile, in profiles: [Profile]) -> Int {
         if let numeric = Int(profile.id), (1...6).contains(numeric) {
@@ -296,7 +344,9 @@ private enum ProfileSyncIndexStore {
     }
 
     private static func bind(localId: String, remoteId: Int) {
-        UserDefaults.standard.set(remoteId, forKey: prefix + localId)
+        let key = prefix + localId
+        guard UserDefaults.standard.integer(forKey: key) != remoteId else { return }
+        UserDefaults.standard.set(remoteId, forKey: key)
     }
 }
 
@@ -314,7 +364,29 @@ fileprivate final class SupabaseSyncClient {
     private let catalogRepository: CatalogRepository = CinemetaCatalogRepository()
 
     func pullProfiles(session: AuthSession) async throws -> [RemoteProfile] {
-        try await rpc("sync_pull_profiles", session: session, params: [:])
+        try await rpcRows("sync_pull_profiles", session: session, params: [:]).elements
+    }
+
+    func pullAddons(session: AuthSession, remoteProfileId: Int) async throws -> [RemoteAddon] {
+        let rows: LossyRows<RemoteAddon> = try await rest(
+            "addons?select=%2A&profile_id=eq.\(remoteProfileId)&order=sort_order",
+            session: session
+        )
+        return rows.elements
+    }
+
+    func applyAddons(_ addons: [RemoteAddon], localProfileId: String) -> Int {
+        let urls = addons
+            .filter(\.enabled)
+            .sorted { $0.sortOrder < $1.sortOrder }
+            .compactMap { CinemetaCatalogRepository.normalizedManifestURL(from: $0.url)?.absoluteString }
+
+        guard !urls.isEmpty else { return 0 }
+
+        let defaults = ProfileSettings.store(for: localProfileId)
+        defaults.set(urls.first, forKey: SettingsKey.streamAddonManifestURL)
+        defaults.set(urls.joined(separator: "\n"), forKey: SettingsKey.streamAddonManifestURLs)
+        return urls.count
     }
 
     func pushProfiles(session: AuthSession, profiles: [Profile]) async throws {
@@ -389,7 +461,7 @@ fileprivate final class SupabaseSyncClient {
         var allItems: [RemoteLibraryItem] = []
         var offset = 0
         while true {
-            let page: [RemoteLibraryItem] = try await rpc(
+            let page: LossyRows<RemoteLibraryItem> = try await rpcRows(
                 "sync_pull_library",
                 session: session,
                 params: [
@@ -398,8 +470,10 @@ fileprivate final class SupabaseSyncClient {
                     "p_offset": offset
                 ]
             )
-            allItems += page
-            if page.count < Self.pullPageSize { break }
+            allItems += page.elements
+            // Paginate on the server's raw row count, not the decoded count —
+            // dropped rows must not end the loop early.
+            if page.rawCount < Self.pullPageSize { break }
             offset += Self.pullPageSize
         }
         return allItems.map { remote in
@@ -445,7 +519,7 @@ fileprivate final class SupabaseSyncClient {
         var allItems: [RemoteWatchedItem] = []
         var page = 1
         while true {
-            let remotePage: [RemoteWatchedItem] = try await rpc(
+            let remotePage: LossyRows<RemoteWatchedItem> = try await rpcRows(
                 "sync_pull_watched_items",
                 session: session,
                 params: [
@@ -454,14 +528,16 @@ fileprivate final class SupabaseSyncClient {
                     "p_page_size": Self.pullPageSize
                 ]
             )
-            allItems += remotePage
-            if remotePage.count < Self.pullPageSize { break }
+            allItems += remotePage.elements
+            if remotePage.rawCount < Self.pullPageSize { break }
             page += 1
         }
         return allItems.map { remote in
             WatchedStoreItem(
                 meta: remote.meta,
-                watchedAt: Self.date(fromMilliseconds: remote.watchedAt)
+                watchedAt: Self.date(fromMilliseconds: remote.watchedAt),
+                season: remote.season,
+                episode: remote.episode
             )
         }
     }
@@ -472,89 +548,196 @@ fileprivate final class SupabaseSyncClient {
                 "content_id": item.meta.id,
                 "content_type": item.meta.type,
                 "title": item.meta.name,
-                "season": NSNull(),
-                "episode": NSNull(),
+                "season": item.season.map { $0 as Any } ?? NSNull(),
+                "episode": item.episode.map { $0 as Any } ?? NSNull(),
                 "watched_at": Self.milliseconds(from: item.watchedAt)
             ]
         }
-        guard !payload.isEmpty else { return }
+        if !payload.isEmpty {
+            try await rpcVoid(
+                "sync_push_watched_items",
+                session: session,
+                params: [
+                    "p_items": payload,
+                    "p_profile_id": remoteProfileId
+                ]
+            )
+        }
+
+        // Marks the user removed locally must also leave the server, or the
+        // next pull restores the checkmark. Deletes are retried on every push;
+        // the tombstone is only cleared once a pull confirms the row is gone
+        // (mergeRemote), so a delete that silently no-ops can't resurrect it.
+        let tombstones = await MainActor.run { WatchedStore.tombstones() }
+        guard !tombstones.isEmpty else { return }
+        let keys = tombstones.map { tombstone -> [String: Any] in
+            [
+                "content_id": tombstone.metaId,
+                "season": tombstone.season.map { $0 as Any } ?? NSNull(),
+                "episode": tombstone.episode.map { $0 as Any } ?? NSNull()
+            ]
+        }
         try await rpcVoid(
-            "sync_push_watched_items",
+            "sync_delete_watched_items",
             session: session,
             params: [
-                "p_items": payload,
+                "p_keys": keys,
                 "p_profile_id": remoteProfileId
             ]
         )
     }
 
     func pullWatchProgress(session: AuthSession, remoteProfileId: Int) async throws -> [ContinueWatchingItem] {
-        let remote: [RemoteWatchProgress] = try await rpc(
+        let remote: [RemoteWatchProgress] = try await rpcRows(
             "sync_pull_watch_progress",
             session: session,
             params: [
                 "p_profile_id": remoteProfileId
             ]
-        )
+        ).elements
         var items: [ContinueWatchingItem] = []
         for entry in remote {
             let type = Self.normalizedContentType(entry.contentType)
             let existing = ContinueWatchingStore.item(for: entry.contentId)
-            let fetchedMeta: NuvioMeta?
-            if existing == nil {
-                fetchedMeta = try? await catalogRepository.getMetadata(id: entry.contentId, type: type)
-            } else {
-                fetchedMeta = nil
+            var meta = existing?.meta ?? entry.fallbackMeta(type: type)
+            if existing == nil,
+               let fetched = try? await catalogRepository.getMetadata(id: entry.contentId, type: type) {
+                meta = fetched
             }
-            let meta = existing?.meta ?? fetchedMeta ?? entry.fallbackMeta(type: type)
-            let position = Double(entry.position) / 1000.0
+            var position = Double(entry.position) / 1000.0
             let duration = Double(entry.duration) / 1000.0
+            var season = entry.season ?? existing?.season
+            var episode = entry.episode ?? existing?.episode
             guard duration > 0 else { continue }
+
+            // The store drops finished entries on read; the phone instead rolls
+            // a finished episode over to the following one, so mirror that here —
+            // otherwise a series whose last-played episode ended disappears
+            // from Continue Watching after sync.
+            let finished = (duration - position) < 60 || (position / duration) >= 0.92
+            if finished {
+                guard meta.isSeries, let currentSeason = season, let currentEpisode = episode else { continue }
+                if meta.videos?.isEmpty != false,
+                   let fetched = try? await catalogRepository.getMetadata(id: entry.contentId, type: type) {
+                    meta = fetched
+                }
+                guard let next = Self.nextEpisode(after: (currentSeason, currentEpisode), in: meta) else {
+                    continue
+                }
+                season = next.season
+                episode = next.episode
+                // Keep the finished episode's duration as the runtime estimate
+                // and start the rolled-over entry at the top.
+                position = 1
+            }
+
+            // An episode row at effectively zero progress (including rows older
+            // builds pushed for rolled-over entries) presents as "Next Up" too,
+            // not as playback with the full runtime remaining.
+            let upNext = finished
+                || (meta.isSeries && season != nil && episode != nil && position <= 1.5)
+
             items.append(
                 ContinueWatchingItem(
                     meta: meta,
-                    streamUrl: existing?.streamUrl ?? "",
+                    // A rolled-over entry must not reuse the finished episode's
+                    // stream URL; empty routes the click to the Details screen.
+                    streamUrl: finished ? "" : (existing?.streamUrl ?? ""),
                     position: position,
                     duration: duration,
-                    lastWatchedAt: Self.date(fromMilliseconds: entry.lastWatched)
+                    lastWatchedAt: Self.date(fromMilliseconds: entry.lastWatched),
+                    season: season,
+                    episode: episode,
+                    isUpNext: upNext ? true : nil
                 )
             )
         }
         return items
     }
 
+    private static func nextEpisode(
+        after current: (season: Int, episode: Int),
+        in meta: NuvioMeta
+    ) -> (season: Int, episode: Int)? {
+        (meta.videos ?? [])
+            .filter { $0.season > 0 }
+            .sorted { ($0.season, $0.episode) < ($1.season, $1.episode) }
+            .first { ($0.season, $0.episode) > (current.season, current.episode) }
+            .map { ($0.season, $0.episode) }
+    }
+
     func pushWatchProgress(session: AuthSession, remoteProfileId: Int) async throws {
-        let payload = ContinueWatchingStore.items().map { item -> [String: Any] in
-            [
+        // Episode entries must use the phone's row conventions — video_id
+        // "id:s:e" and progress_key "id_s{s}e{e}" — or each platform upserts
+        // its own parallel row for the same episode and they fight over
+        // recency/progress on the other clients.
+        var staleSeriesKeys: [String] = []
+        let payload = ContinueWatchingStore.items().compactMap { item -> [String: Any]? in
+            // "Next Up" entries are presentation, not playback — pushing them
+            // would create phantom just-started rows on the other clients. The
+            // finished previous-episode row already carries the signal, so
+            // retire any phantom this build (or an older one) wrote earlier.
+            if item.isUpNextEntry {
+                if let season = item.season, let episode = item.episode {
+                    staleSeriesKeys.append("\(item.meta.id)_s\(season)e\(episode)")
+                }
+                staleSeriesKeys.append(item.meta.id)
+                return nil
+            }
+            let videoId: String
+            let progressKey: String
+            if let season = item.season, let episode = item.episode {
+                videoId = "\(item.meta.id):\(season):\(episode)"
+                progressKey = "\(item.meta.id)_s\(season)e\(episode)"
+                staleSeriesKeys.append(item.meta.id)
+            } else {
+                videoId = item.meta.id
+                progressKey = item.meta.id
+            }
+            return [
                 "content_id": item.meta.id,
                 "content_type": item.meta.type,
-                "video_id": item.meta.id,
-                "season": NSNull(),
-                "episode": NSNull(),
+                "video_id": videoId,
+                "season": item.season.map { $0 as Any } ?? NSNull(),
+                "episode": item.episode.map { $0 as Any } ?? NSNull(),
                 "position": Int64(item.position * 1000),
                 "duration": Int64(item.duration * 1000),
                 "last_watched": Self.milliseconds(from: item.lastWatchedAt),
-                "progress_key": item.meta.id
+                "progress_key": progressKey
             ]
         }
-        guard !payload.isEmpty else { return }
-        try await rpcVoid(
-            "sync_push_watch_progress",
-            session: session,
-            params: [
-                "p_entries": payload,
-                "p_profile_id": remoteProfileId
-            ]
-        )
+        if !payload.isEmpty {
+            try await rpcVoid(
+                "sync_push_watch_progress",
+                session: session,
+                params: [
+                    "p_entries": payload,
+                    "p_profile_id": remoteProfileId
+                ]
+            )
+        }
+
+        // Older builds pushed series episodes under the bare series id; those
+        // rows linger as duplicates on other clients, so retire them.
+        if !staleSeriesKeys.isEmpty {
+            try? await rpcVoid(
+                "sync_delete_watch_progress",
+                session: session,
+                params: [
+                    "p_keys": staleSeriesKeys,
+                    "p_profile_id": remoteProfileId
+                ]
+            )
+        }
     }
 
-    private func rpc<T: Decodable>(
+    private func rpcRows<T: Decodable>(
         _ name: String,
         session authSession: AuthSession,
         params: [String: Any]
-    ) async throws -> T {
+    ) async throws -> LossyRows<T> {
         let data = try await rpcData(name, session: authSession, params: params)
-        return try decoder.decode(T.self, from: data)
+        return try decoder.decode(LossyRows<T>.self, from: data)
     }
 
     private func rpcVoid(
@@ -574,6 +757,32 @@ fileprivate final class SupabaseSyncClient {
         return try JSONSerialization.jsonObject(with: data)
     }
 
+    private func rest<T: Decodable>(
+        _ path: String,
+        session authSession: AuthSession
+    ) async throws -> T {
+        guard AuthConfig.isConfigured else {
+            throw AuthError(message: "Account backend is not configured.")
+        }
+        guard let url = URL(string: "\(AuthConfig.normalizedSupabaseURL)/rest/v1/\(path)") else {
+            throw AuthError(message: "Invalid backend URL")
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(AuthConfig.apiKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(authSession.accessToken)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else {
+            throw AuthError(message: "No response from server")
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw AuthError(message: Self.serverErrorMessage(data: data, status: http.statusCode))
+        }
+        return try decoder.decode(T.self, from: data)
+    }
+
     private func rpcData(
         _ name: String,
         session authSession: AuthSession,
@@ -587,7 +796,7 @@ fileprivate final class SupabaseSyncClient {
         }
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue(AuthConfig.anonKey, forHTTPHeaderField: "apikey")
+        request.setValue(AuthConfig.apiKey, forHTTPHeaderField: "apikey")
         request.setValue("Bearer \(authSession.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
@@ -697,6 +906,37 @@ fileprivate final class SupabaseSyncClient {
     }
 }
 
+/// Decodes every row it can and keeps the server's raw row count, so a single
+/// malformed row drops just that row instead of failing the whole page — and
+/// pagination can still advance by the true count.
+private struct LossyRows<Element: Decodable>: Decodable {
+    var elements: [Element] = []
+    var rawCount = 0
+
+    init(from decoder: Decoder) throws {
+        var container = try decoder.unkeyedContainer()
+        while !container.isAtEnd {
+            rawCount += 1
+            if let element = try? container.decode(Element.self) {
+                elements.append(element)
+                continue
+            }
+            // Consume the bad row so the container advances; bail if nothing
+            // matches rather than spin on the same index forever.
+            if (try? container.decode(DiscardedRow.self)) == nil,
+               (try? container.decode([DiscardedRow].self)) == nil,
+               (try? container.decode(String.self)) == nil,
+               (try? container.decode(Double.self)) == nil,
+               (try? container.decode(Bool.self)) == nil,
+               (try? container.decodeNil()) != true {
+                break
+            }
+        }
+    }
+
+    private struct DiscardedRow: Decodable {}
+}
+
 private struct RemoteProfile: Decodable {
     let profileIndex: Int
     let name: String
@@ -713,6 +953,28 @@ private struct RemoteProfile: Decodable {
         profileIndex = try container.decode(Int.self, forKey: .profileIndex)
         name = (try? container.decode(String.self, forKey: .name)) ?? ""
         avatarId = try? container.decodeIfPresent(String.self, forKey: .avatarId)
+    }
+}
+
+private struct RemoteAddon: Decodable {
+    let url: String
+    let name: String?
+    let enabled: Bool
+    let sortOrder: Int
+
+    enum CodingKeys: String, CodingKey {
+        case url
+        case name
+        case enabled
+        case sortOrder
+    }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        url = (try? container.decode(String.self, forKey: .url)) ?? ""
+        name = try? container.decodeIfPresent(String.self, forKey: .name)
+        enabled = (try? container.decode(Bool.self, forKey: .enabled)) ?? true
+        sortOrder = (try? container.decode(Int.self, forKey: .sortOrder)) ?? 0
     }
 }
 
@@ -786,6 +1048,8 @@ private struct RemoteWatchedItem: Decodable {
     let contentId: String
     let contentType: String
     let title: String
+    let season: Int?
+    let episode: Int?
     let watchedAt: Int64
 
     var meta: NuvioMeta {
@@ -817,6 +1081,8 @@ private struct RemoteWatchedItem: Decodable {
         case contentId
         case contentType
         case title
+        case season
+        case episode
         case watchedAt
     }
 
@@ -825,6 +1091,8 @@ private struct RemoteWatchedItem: Decodable {
         contentId = try container.decode(String.self, forKey: .contentId)
         contentType = try container.decode(String.self, forKey: .contentType)
         title = (try? container.decode(String.self, forKey: .title)) ?? ""
+        season = try? container.decodeIfPresent(Int.self, forKey: .season)
+        episode = try? container.decodeIfPresent(Int.self, forKey: .episode)
         watchedAt = (try? container.decode(Int64.self, forKey: .watchedAt)) ?? 0
     }
 }

@@ -36,7 +36,7 @@ The original shared mobile code is still present in [composeApp](./composeApp), 
 - Cinemeta-backed catalog and metadata repository with Stremio-compatible stream/subtitle addon hooks.
 - User-configurable Stremio stream addon manifest URL in Settings → Integrations → Add-ons.
 - QR-code and email login flow backed by Supabase configuration in [AuthConfig.swift](./tvosApp/NuvioTV/Sources/Core/Auth/AuthConfig.swift).
-- Local Swift profile/session stubs while the full shared/Rust-backed account surface is being ported.
+- Local Swift profile/session stubs while the full shared account surface is being ported.
 - MPVKit-based player surface with tvOS remote input, skip controls, subtitle handling, and resume support.
 - tvOS app assets, splash screen, top shelf images, and Apple TV app icon stack in [Images.xcassets](./tvosApp/NuvioTV/Images.xcassets).
 

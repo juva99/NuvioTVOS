@@ -13,6 +13,16 @@ private enum LibraryGridMetrics {
 public struct LibraryView: View {
     @StateObject private var viewModel: LibraryViewModel
     let onContentClick: (String, String) -> Void
+    @FocusState private var focusedItemID: String?
+    /// Last card focused in the grid, kept so returning from details (which
+    /// steals focus and nils `focusedItemID`) restores that card instead of
+    /// snapping back to the top of the grid.
+    @State private var lastFocusedItemID: String?
+    @State private var shouldRestoreFocus = false
+    /// Card to actively re-focus once the Details overlay dismisses; captured
+    /// when the tab view gets disabled (overlay up), consumed on re-enable.
+    @State private var overlayRestoreItemID: String?
+    @Environment(\.isEnabled) private var isEnabled
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
 
@@ -61,9 +71,10 @@ public struct LibraryView: View {
 
                             LazyVGrid(columns: gridColumns, alignment: .leading, spacing: LibraryGridMetrics.posterGap) {
                                 ForEach(viewModel.sortedAndGroupedItems[group] ?? [], id: \.id) { item in
-                                    LibraryItemButton(item: item) {
+                                    LibraryItemButton(item: item, externalFocus: $focusedItemID) {
                                         onContentClick(item.id, item.contentType)
                                     }
+                                    .disabled(overlayRestoreItemID != nil && overlayRestoreItemID != item.id)
                                 }
                             }
                         }
@@ -72,9 +83,39 @@ public struct LibraryView: View {
                     .padding(.bottom, 90)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .focusSection()
+                .defaultFocusIfAvailable($focusedItemID, shouldRestoreFocus ? lastFocusedItemID : nil)
             }
             .padding(.horizontal, 80)
             .padding(.top, 56)
+        }
+        .onChange(of: focusedItemID) { newValue in
+            if let newValue {
+                lastFocusedItemID = newValue
+                shouldRestoreFocus = false
+                // Restoration complete -- lift the focus restriction.
+                if newValue == overlayRestoreItemID { overlayRestoreItemID = nil }
+            } else if lastFocusedItemID != nil {
+                shouldRestoreFocus = true
+            }
+        }
+        // Overlay dismissal re-places focus geometrically without consulting
+        // `defaultFocus`. While `overlayRestoreItemID` is set every other card
+        // is unfocusable, so the engine can only land back on the saved card
+        // -- no scroll-to-top flash. See TVHomeView for the full story.
+        .onChange(of: isEnabled) { enabled in
+            if !enabled {
+                overlayRestoreItemID = focusedItemID ?? lastFocusedItemID
+            } else if let target = overlayRestoreItemID {
+                for delay in [0.12, 0.45] {
+                    DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                        if overlayRestoreItemID == target { focusedItemID = target }
+                    }
+                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                    if overlayRestoreItemID == target { overlayRestoreItemID = nil }
+                }
+            }
         }
     }
 
@@ -98,8 +139,9 @@ public struct LibraryView: View {
 
 struct LibraryItemButton: View {
     let item: StremioMeta
+    var externalFocus: FocusState<String?>.Binding? = nil
     let action: () -> Void
-    
+
     @FocusState private var isFocused: Bool
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
@@ -152,6 +194,7 @@ struct LibraryItemButton: View {
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
+        .modifier(ExternalFocusBinding(binding: externalFocus, id: item.id))
         .focusEffectDisabledIfAvailable()
         .zIndex(isFocused ? 1 : 0)
     }
