@@ -74,9 +74,10 @@ struct LoginView: View {
 
     private var leftPane: some View {
         VStack(alignment: .leading, spacing: 22) {
-            Text("NUVIO")
-                .font(.system(size: 64, weight: .black))
-                .foregroundColor(.white)
+            Image("BrandWordmark")
+                .resizable()
+                .scaledToFit()
+                .frame(width: 300)
 
             Text(auth.isAuthenticated ? "You're signed in" : "Sign in to Nuvio")
                 .font(.system(size: 40, weight: .bold))
@@ -131,12 +132,7 @@ struct LoginView: View {
             }
         }
         .padding(40)
-        .background(Color.white.opacity(0.05))
-        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 22, style: .continuous)
-                .stroke(Color.white.opacity(0.12), lineWidth: 1)
-        )
+        .loginGlassPanel()
     }
 
     private var methodToggle: some View {
@@ -194,7 +190,7 @@ struct LoginView: View {
             }
 
             LoginButton(title: "Refresh QR", systemImage: "arrow.clockwise", disabled: auth.isBusy) {
-                auth.startQrLogin()
+                auth.startQrLogin(force: true)
             }
         }
     }
@@ -207,14 +203,19 @@ struct LoginView: View {
                 .font(.system(size: 28, weight: .bold))
                 .foregroundColor(.white)
 
-            TextField("Email", text: $email)
-                .textContentType(.emailAddress)
-                .autocorrectionDisabled(true)
-                .loginFieldStyle()
+            LoginGlassField(
+                placeholder: "Email",
+                text: $email,
+                keyboardType: .emailAddress,
+                textContentType: .emailAddress
+            )
 
-            SecureField("Password", text: $password)
-                .textContentType(isSignUp ? .newPassword : .password)
-                .loginFieldStyle()
+            LoginGlassField(
+                placeholder: "Password",
+                text: $password,
+                isSecure: true,
+                textContentType: isSignUp ? .newPassword : .password
+            )
 
             LoginButton(
                 title: isSignUp ? "Create Account" : "Sign In",
@@ -231,12 +232,12 @@ struct LoginView: View {
                 }
             }
 
-            Button(action: { isSignUp.toggle(); auth.errorMessage = nil }) {
-                Text(isSignUp ? "Already have an account? Sign in" : "New to Nuvio? Create an account")
-                    .font(.system(size: 20, weight: .medium))
-                    .foregroundColor(.white.opacity(0.7))
+            LoginLinkButton(
+                title: isSignUp ? "Already have an account? Sign in" : "New to Nuvio? Create an account"
+            ) {
+                isSignUp.toggle()
+                auth.errorMessage = nil
             }
-            .buttonStyle(.plain)
         }
     }
 
@@ -284,8 +285,7 @@ private struct MethodTab: View {
                 .foregroundColor(isSelected || focused ? .black : .white)
                 .padding(.horizontal, 28)
                 .frame(height: 52)
-                .background(isSelected || focused ? Color.white : Color.white.opacity(0.12))
-                .clipShape(Capsule())
+                .loginGlassCapsule(highlighted: isSelected || focused)
         }
         .buttonStyle(PosterCardButtonStyle())
         .focused($focused)
@@ -314,12 +314,13 @@ private struct LoginButton: View {
             .padding(.horizontal, 26)
             .frame(height: 58)
             .frame(maxWidth: .infinity)
-            .background(background)
-            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+            .loginGlassCapsule(highlighted: focused, prominent: prominent)
             .opacity(disabled ? 0.5 : 1)
             .scaleEffect(focused && !disabled ? 1.03 : 1)
         }
-        .buttonStyle(.plain)
+        // PosterCardButtonStyle (not .plain): the plain style draws its own
+        // white focus platter on tvOS even with focusEffectDisabled().
+        .buttonStyle(PosterCardButtonStyle())
         .disabled(disabled)
         .focused($focused)
         .focusEffectDisabledIfAvailable()
@@ -330,10 +331,159 @@ private struct LoginButton: View {
         if focused { return .black }
         return prominent ? .black : .white
     }
+}
 
-    private var background: Color {
-        if focused { return .white }
-        return prominent ? Color.white.opacity(0.92) : Color.white.opacity(0.12)
+/// Email/password entry styled like the Search bar and Settings fields: a
+/// Liquid Glass capsule with a hidden off-screen UITextField driving editing,
+/// because a native focused TextField/SecureField on tvOS always paints its
+/// own white pill over custom chrome.
+private struct LoginGlassField: View {
+    let placeholder: String
+    @Binding var text: String
+    var isSecure: Bool = false
+    var keyboardType: UIKeyboardType = .default
+    var textContentType: UITextContentType? = nil
+
+    @FocusState private var focused: Bool
+    @State private var isEditing = false
+
+    var body: some View {
+        Button {
+            isEditing = true
+        } label: {
+            ZStack(alignment: .leading) {
+                HiddenLoginTextField(
+                    text: $text,
+                    isEditing: $isEditing,
+                    isSecure: isSecure,
+                    keyboardType: keyboardType,
+                    textContentType: textContentType
+                )
+                .frame(width: 1, height: 1)
+                .offset(x: -4_000)
+                .allowsHitTesting(false)
+
+                Text(displayText)
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundColor(text.isEmpty ? .white.opacity(0.45) : .white)
+                    .lineLimit(1)
+                    .padding(.horizontal, 24)
+                    .allowsHitTesting(false)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(height: 58)
+            .modifier(GlassCapsule(focused: focused || isEditing))
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($focused)
+        .focusEffectDisabledIfAvailable()
+    }
+
+    private var displayText: String {
+        guard !text.isEmpty else { return placeholder }
+        return isSecure ? String(repeating: "•", count: text.count) : text
+    }
+}
+
+/// Off-screen UITextField that drives editing for LoginGlassField. Mirrors the
+/// Settings tab's private helper: never focusable itself, invisible, and only
+/// used to summon the keyboard and receive text.
+private struct HiddenLoginTextField: UIViewRepresentable {
+    @Binding var text: String
+    @Binding var isEditing: Bool
+    var isSecure: Bool = false
+    var keyboardType: UIKeyboardType = .default
+    var textContentType: UITextContentType? = nil
+
+    func makeUIView(context: Context) -> HiddenLoginUITextField {
+        let textField = HiddenLoginUITextField(frame: .zero)
+        textField.delegate = context.coordinator
+        textField.backgroundColor = .clear
+        textField.textColor = .clear
+        textField.tintColor = .clear
+        textField.returnKeyType = .done
+        textField.keyboardAppearance = .dark
+        textField.autocorrectionType = .no
+        textField.autocapitalizationType = .none
+        textField.isSecureTextEntry = isSecure
+        textField.keyboardType = keyboardType
+        textField.textContentType = textContentType
+        textField.addTarget(
+            context.coordinator,
+            action: #selector(Coordinator.textDidChange(_:)),
+            for: .editingChanged
+        )
+        return textField
+    }
+
+    func updateUIView(_ uiView: HiddenLoginUITextField, context: Context) {
+        if uiView.text != text {
+            uiView.text = text
+        }
+
+        if isEditing && !uiView.isFirstResponder {
+            DispatchQueue.main.async {
+                uiView.becomeFirstResponder()
+            }
+        } else if !isEditing && uiView.isFirstResponder {
+            uiView.resignFirstResponder()
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(text: $text, isEditing: $isEditing)
+    }
+
+    final class Coordinator: NSObject, UITextFieldDelegate {
+        private let text: Binding<String>
+        private let isEditing: Binding<Bool>
+
+        init(text: Binding<String>, isEditing: Binding<Bool>) {
+            self.text = text
+            self.isEditing = isEditing
+        }
+
+        @objc func textDidChange(_ sender: UITextField) {
+            text.wrappedValue = sender.text ?? ""
+        }
+
+        func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+            isEditing.wrappedValue = false
+            textField.resignFirstResponder()
+            return true
+        }
+
+        func textFieldDidEndEditing(_ textField: UITextField) {
+            isEditing.wrappedValue = false
+        }
+    }
+}
+
+private final class HiddenLoginUITextField: UITextField {
+    override var canBecomeFocused: Bool { false }
+}
+
+/// Small text-link button (e.g. sign-in/sign-up toggle) with the shared glass
+/// capsule focus treatment instead of the system's white platter.
+private struct LoginLinkButton: View {
+    let title: String
+    let action: () -> Void
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 20, weight: .medium))
+                .foregroundColor(focused ? .white : .white.opacity(0.7))
+                .padding(.horizontal, 24)
+                .frame(height: 46)
+                .modifier(GlassCapsule(focused: focused))
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($focused)
+        .focusEffectDisabledIfAvailable()
+        .scaleEffect(focused ? 1.04 : 1)
+        .animation(.easeOut(duration: 0.12), value: focused)
     }
 }
 
@@ -352,13 +502,43 @@ private struct CountdownText: View {
 }
 
 private extension View {
-    func loginFieldStyle() -> some View {
-        self
-            .font(.system(size: 22))
-            .textFieldStyle(.plain)
-            .padding(.horizontal, 20)
-            .frame(height: 60)
-            .background(Color.white.opacity(0.1))
-            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+    /// Capsule chrome shared by the login card's buttons and tabs: Liquid
+    /// Glass on tvOS 26+, translucent white fill on older versions.
+    /// `highlighted` renders the solid-white selected/focused state (pair it
+    /// with black text); `prominent` brightens the resting state for the
+    /// primary call-to-action.
+    @ViewBuilder
+    func loginGlassCapsule(highlighted: Bool, prominent: Bool = false) -> some View {
+        if #available(tvOS 26.0, *) {
+            glassEffect(
+                highlighted
+                    ? Glass.regular.tint(.white.opacity(0.92))
+                    : prominent ? Glass.regular.tint(.white.opacity(0.75)) : Glass.regular,
+                in: Capsule()
+            )
+        } else {
+            background(
+                highlighted
+                    ? Color.white
+                    : Color.white.opacity(prominent ? 0.92 : 0.12)
+            )
+            .clipShape(Capsule())
+        }
+    }
+
+    /// Liquid Glass panel behind the whole login card, with a material
+    /// fallback for tvOS < 26 that keeps the previous translucent look.
+    @ViewBuilder
+    func loginGlassPanel() -> some View {
+        if #available(tvOS 26.0, *) {
+            glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        } else {
+            background(.ultraThinMaterial)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 22, style: .continuous)
+                        .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                )
+        }
     }
 }

@@ -51,6 +51,9 @@ enum TVTab: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @State private var activeScreen: TVScreen = .login
     @State private var resolvedInitialScreen = false
+    // Holds the who's-watching screen back until the post-sign-in profile pull
+    // lands, so freshly imported profile names show instead of local stubs.
+    @State private var awaitingPostLoginSync = false
     @State private var selectedTab: TVTab = .home
     @StateObject private var authManager = AuthManager()
     @StateObject private var profileViewModel = ProfileViewModel()
@@ -70,20 +73,36 @@ struct ContentView: View {
             case .login:
                 LoginView(auth: authManager) {
                     withAnimation(.easeInOut(duration: 0.28)) {
+                        awaitingPostLoginSync = authManager.isAuthenticated && AuthConfig.isConfigured
                         activeScreen = .profileSelection
                     }
                 }
                 .transition(.opacity)
 
             case .profileSelection:
-                UserProfileView(viewModel: profileViewModel)
-                    .onReceive(profileViewModel.$activeProfile) { activeProfile in
-                        if activeProfile != nil {
+                if awaitingPostLoginSync && syncManager.isPullingAccountProfiles {
+                    AccountSyncWaitView()
+                        .transition(.opacity)
+                        // Escape hatch: never trap the user here if the pull
+                        // stalls (dead network, server hiccup).
+                        .task {
+                            try? await Task.sleep(nanoseconds: 20_000_000_000)
+                            withAnimation(.easeInOut(duration: 0.28)) {
+                                awaitingPostLoginSync = false
+                            }
+                        }
+                } else {
+                    UserProfileView(viewModel: profileViewModel)
+                        .transition(.opacity)
+                        // Navigate only on an explicit pick. Listening to
+                        // $activeProfile here would auto-enter a profile the
+                        // moment the sync refreshes it mid-selection.
+                        .onReceive(profileViewModel.profileChosen) { _ in
                             withAnimation(.easeInOut(duration: 0.28)) {
                                 activeScreen = .main
                             }
                         }
-                    }
+                }
 
             case .main, .details, .player:
                 // The tab view (Home included) stays mounted for the whole
@@ -117,11 +136,28 @@ struct ContentView: View {
             // Skip the login gate if a session was restored or the user has
             // previously chosen to continue without an account.
             if !authManager.shouldShowLoginGate {
-                activeScreen = .profileSelection
+                // Auto-select-last-profile (Settings → Profile) skips the
+                // who's-watching stop on launch; navigation is otherwise
+                // driven only by an explicit pick via `profileChosen`.
+                let autoSelectLast = ProfileSettings.current.object(
+                    forKey: SettingsKey.profileAutoSelectLast
+                ) as? Bool ?? true
+                if autoSelectLast, profileViewModel.activeProfile != nil {
+                    activeScreen = .main
+                } else {
+                    activeScreen = .profileSelection
+                }
             }
         }
         .onReceive(authManager.$authState) { state in
             syncManager.authStateChanged(state)
+        }
+        .onReceive(syncManager.$isPullingAccountProfiles) { pulling in
+            if !pulling, awaitingPostLoginSync {
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    awaitingPostLoginSync = false
+                }
+            }
         }
         .onReceive(profileViewModel.$activeProfile) { profile in
             syncManager.activeProfileChanged(profile)
@@ -379,6 +415,31 @@ struct ContentView: View {
                 }
             }
         }
+    }
+}
+
+/// Shown between login and who's-watching while the first account pull is in
+/// flight, so profile names arrive before the selection grid renders.
+private struct AccountSyncWaitView: View {
+    var body: some View {
+        VStack(spacing: 26) {
+            ProgressView()
+                .progressViewStyle(.circular)
+                .tint(.white)
+                .scaleEffect(1.6)
+
+            Text("Syncing your account")
+                .font(.custom("Inter-Bold", size: 44))
+                .foregroundColor(.white)
+
+            Text("Hang tight while we import your profiles and watch history.")
+                .font(.custom("Inter-Regular", size: 28))
+                .foregroundColor(.white.opacity(0.6))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        // Give the focus engine somewhere to land; with no focusable view on
+        // screen a Menu press would quit the app.
+        .focusable()
     }
 }
 

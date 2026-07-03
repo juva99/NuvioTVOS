@@ -12,6 +12,11 @@ import Foundation
 
 @MainActor
 final class NuvioSyncManager: ObservableObject {
+    /// True from sign-in until the first profile pull has been applied (or the
+    /// pull fails), so the who's-watching screen can wait for real profile
+    /// names instead of rendering local stubs.
+    @Published private(set) var isPullingAccountProfiles = false
+
     private let client = SupabaseSyncClient()
 
     private weak var authManager: AuthManager?
@@ -74,11 +79,15 @@ final class NuvioSyncManager: ObservableObject {
     func authStateChanged(_ state: AuthState) {
         switch state {
         case .fullAccount:
+            if AuthConfig.isConfigured {
+                isPullingAccountProfiles = true
+            }
             schedulePull(force: true)
         case .signedOut:
             pullTask?.cancel()
             pushTask?.cancel()
             completedInitialPullKeys.removeAll()
+            isPullingAccountProfiles = false
         case .loading:
             break
         }
@@ -116,12 +125,27 @@ final class NuvioSyncManager: ObservableObject {
         }
     }
 
+    /// Task cancellation is cooperative, so a pull that is mid-flight when the
+    /// user signs out would otherwise finish and pour account data back into
+    /// the freshly wiped local stores. Call between every network step and the
+    /// local apply that follows it; throws once auth flips or the task is
+    /// cancelled so the sync dies before it can touch local state.
+    private func ensureStillSyncing() throws {
+        try Task.checkCancellation()
+        guard authManager?.isAuthenticated == true else { throw CancellationError() }
+    }
+
     private func pullThenPush() async {
+        // Release the who's-watching sync gate on every exit path; the happy
+        // path clears it earlier, as soon as profile names are in.
+        defer { isPullingAccountProfiles = false }
+
         guard let authManager, let profileViewModel else { return }
         guard let session = await authManager.validSessionForSync() else { return }
 
         do {
             let remoteProfiles = try await client.pullProfiles(session: session)
+            try ensureStillSyncing()
             if !remoteProfiles.isEmpty {
                 let merged = ProfileSyncIndexStore.localProfiles(
                     from: remoteProfiles,
@@ -136,6 +160,7 @@ final class NuvioSyncManager: ObservableObject {
                     profiles: profileViewModel.profiles
                 )
             }
+            isPullingAccountProfiles = false
 
             guard let activeProfile = profileViewModel.activeProfile ?? profileViewModel.profiles.first else {
                 return
@@ -146,6 +171,7 @@ final class NuvioSyncManager: ObservableObject {
                 in: profileViewModel.profiles
             )
 
+            try ensureStillSyncing()
             isApplyingRemote = true
             let settingsApplied = try await client.pullProfileSettings(
                 session: session,
@@ -165,10 +191,13 @@ final class NuvioSyncManager: ObservableObject {
                     session: session,
                     remoteProfileId: remoteProfileId
                 )
+                try ensureStillSyncing()
                 if !remoteAddons.isEmpty {
                     let appliedCount = client.applyAddons(remoteAddons, localProfileId: activeProfile.id)
                     print("Nuvio sync pulled \(appliedCount) enabled add-on(s).")
                 }
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 print("Nuvio add-on sync failed: \(error.localizedDescription)")
             }
@@ -182,7 +211,10 @@ final class NuvioSyncManager: ObservableObject {
                         session: session,
                         remoteProfileId: remoteProfileId
                     )
+                    try ensureStillSyncing()
                     LibraryStore.mergeRemote(remoteLibrary)
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     pullFailures += 1
                     print("Nuvio library sync failed: \(error.localizedDescription)")
@@ -193,7 +225,10 @@ final class NuvioSyncManager: ObservableObject {
                         session: session,
                         remoteProfileId: remoteProfileId
                     )
+                    try ensureStillSyncing()
                     WatchedStore.mergeRemote(remoteWatched)
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     pullFailures += 1
                     print("Nuvio watched sync failed: \(error.localizedDescription)")
@@ -204,7 +239,10 @@ final class NuvioSyncManager: ObservableObject {
                         session: session,
                         remoteProfileId: remoteProfileId
                     )
+                    try ensureStillSyncing()
                     ContinueWatchingStore.mergeRemote(remoteProgress)
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     pullFailures += 1
                     print("Nuvio watch progress sync failed: \(error.localizedDescription)")
@@ -236,7 +274,12 @@ final class NuvioSyncManager: ObservableObject {
         )
 
         do {
+            // A push racing a sign-out would upload the freshly wiped (empty)
+            // local snapshots over the account's server data — abort between
+            // steps the moment auth flips.
+            try ensureStillSyncing()
             try await client.pushProfiles(session: session, profiles: profileViewModel.profiles)
+            try ensureStillSyncing()
             try await client.pushProfileSettings(
                 session: session,
                 remoteProfileId: remoteProfileId,
@@ -244,10 +287,15 @@ final class NuvioSyncManager: ObservableObject {
             )
 
             guard Self.watchStateSyncEnabled(for: activeProfile.id) else { return }
+            try ensureStillSyncing()
             try await client.pushLibrary(session: session, remoteProfileId: remoteProfileId)
+            try ensureStillSyncing()
             try await client.pushWatched(session: session, remoteProfileId: remoteProfileId)
+            try ensureStillSyncing()
             try await client.pushWatchProgress(session: session, remoteProfileId: remoteProfileId)
             print("Nuvio sync pushed \(LibraryStore.items().count) library, \(WatchedStore.items().count) watched, \(ContinueWatchingStore.items().count) progress item(s).")
+        } catch is CancellationError {
+            // Signed out mid-push: stop quietly, nothing was corrupted.
         } catch {
             print("Nuvio sync push failed: \(error.localizedDescription)")
         }

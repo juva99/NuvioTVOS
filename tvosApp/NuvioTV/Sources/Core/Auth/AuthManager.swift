@@ -145,8 +145,22 @@ final class AuthManager: ObservableObject {
 
     // MARK: - QR login
 
-    func startQrLogin() {
+    func startQrLogin(force: Bool = false) {
         guard ensureConfigured() else { return }
+
+        // Reuse the current pending session when possible: every fresh start
+        // consumes an anonymous sign-in plus a TV-login session server-side,
+        // and both are rate-limited. Re-entering the screen or toggling
+        // QR/Email must not mint new sessions while one is still valid;
+        // only the explicit Refresh QR button forces a new one.
+        if !force,
+           let expires = qrExpiresAt, expires.timeIntervalSinceNow > 30,
+           qrCode != nil, qrNonce != nil, qrAnonAccessToken != nil, qrImage != nil {
+            qrStatusMessage = "Waiting for approval on your phone…"
+            startPolling(intervalSeconds: 2)
+            return
+        }
+
         pollTask?.cancel()
         clearQrState()
         isBusy = true
@@ -218,6 +232,9 @@ final class AuthManager: ObservableObject {
                 qrStatusMessage = "Waiting for approval on your phone…"
             case "expired", "used", "cancelled":
                 qrStatusMessage = "QR login expired. Generate a new code."
+                // Dead session: drop the expiry so the reuse path in
+                // startQrLogin() can't resurrect it.
+                qrExpiresAt = nil
                 pollTask?.cancel()
                 pollTask = nil
             default:

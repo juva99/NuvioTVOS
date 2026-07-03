@@ -222,6 +222,11 @@ public class ProfileViewModel: ObservableObject {
     @Published public var isLoading = false
     @Published public var pendingProfileId: String?
 
+    /// Fires only when the user explicitly picks a profile (who's-watching
+    /// card or PIN confirmation) — never when a sync refreshes
+    /// `activeProfile`. Screens navigate on this, not on `$activeProfile`.
+    public let profileChosen = PassthroughSubject<Profile, Never>()
+
     private let profileManager: ProfileManager?
 
     public init(profileManager: ProfileManager? = nil) {
@@ -356,6 +361,9 @@ public class ProfileViewModel: ObservableObject {
             isPinEntryVisible = false
             pendingProfileId = nil
             pinError = nil
+            if let profile = activeProfile {
+                profileChosen.send(profile)
+            }
         } catch {
             print("Failed to switch profile: \(error)")
         }
@@ -366,6 +374,11 @@ public class ProfileViewModel: ObservableObject {
         do {
             try profileManager?.replaceProfiles(remoteProfiles)
             loadProfiles()
+            // Unconditional: besides refreshing the profile object this scopes
+            // the watch-state stores (setActiveProfile) so the sync's merges
+            // that follow land in the right per-profile buckets. Navigation
+            // away from who's-watching listens to `profileChosen`, not
+            // `activeProfile`, so this can't yank the user into a profile.
             loadActiveProfile()
         } catch {
             print("Failed to apply remote profiles: \(error)")
