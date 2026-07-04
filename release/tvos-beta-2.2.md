@@ -13,6 +13,7 @@ Known issues (coming later):
 
 - Intro skip is not available yet.
 - Next episode inside the player is not available yet.
+- Trakt integration is not available yet.
 - Sideloaded-device login exits are still under investigation. If the app returns to the Apple TV Home screen after login, please send the Xcode device console or crash log.
 
 Note: the attached IPA is unsigned because no tvOS signing identity is configured on this machine.
