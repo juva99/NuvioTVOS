@@ -14,6 +14,10 @@ struct SubtitleTrack: Identifiable, Equatable {
     let name: String
     let language: String
     var isSelected: Bool
+    /// URL/path mpv loaded this track from, empty for tracks embedded in the
+    /// stream. Lets the subtitle panel tell external tracks apart and map them
+    /// back to the `NuvioSubtitle` they were added from.
+    var externalFilename: String = ""
 }
 
 struct AudioTrack: Identifiable, Equatable {
@@ -21,6 +25,10 @@ struct AudioTrack: Identifiable, Equatable {
     let name: String
     let language: String
     var isSelected: Bool
+    /// Localized language name for the card's secondary line ("Russian").
+    var languageName: String = ""
+    /// Technical summary line ("AC-3 | 6 ch | 48 kHz").
+    var detail: String = ""
 }
 
 enum PlaybackSpeed: Float, CaseIterable, Identifiable {

@@ -67,6 +67,16 @@ struct NuvioMeta: Identifiable, Codable {
 
     var isSeries: Bool { type == "series" }
 
+    /// Series status badge text ("ONGOING" / "ENDED"); nil for movies or
+    /// when Cinemeta didn't provide a status. Shared by the details header
+    /// and the Home hero.
+    var statusBadgeLabel: String? {
+        guard isSeries,
+              let status = status?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !status.isEmpty else { return nil }
+        return status.caseInsensitiveCompare("Continuing") == .orderedSame ? "ONGOING" : status.uppercased()
+    }
+
     init(
         id: String,
         name: String,
@@ -136,6 +146,9 @@ struct NuvioSubtitle: Identifiable, Codable, Equatable {
     let url: String
     let language: String
     let label: String?
+    /// Where the subtitle came from ("OpenSubtitles v3", stream add-on name);
+    /// shown as the badge in the player's subtitle picker.
+    var source: String? = nil
 }
 
 struct NuvioStream: Identifiable, Codable {
@@ -543,6 +556,162 @@ enum LibraryStore {
     }
 
     /// Deletes every profile's library (and the legacy shared one) on sign-out.
+    static func eraseAllProfiles() {
+        let defaults = UserDefaults.standard
+        defaults.dictionaryRepresentation().keys
+            .filter { $0.hasPrefix(baseKey) }
+            .forEach { defaults.removeObject(forKey: $0) }
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+}
+
+// MARK: - Account collections (synced read-only from the phone/Android apps)
+
+/// Mirrors the Android app's serialized collection JSON
+/// (`CollectionsDataStore.SerializableCollection`). Only the fields tvOS
+/// renders are declared; unknown fields in the blob are ignored, and every
+/// optional has a default so older/newer payload shapes still decode.
+struct NuvioCollection: Codable, Identifiable {
+    let id: String
+    let title: String
+    var pinToTop: Bool
+    var folders: [NuvioCollectionFolder]
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        pinToTop = try c.decodeIfPresent(Bool.self, forKey: .pinToTop) ?? false
+        folders = try c.decodeIfPresent([NuvioCollectionFolder].self, forKey: .folders) ?? []
+    }
+}
+
+struct NuvioCollectionFolder: Codable, Identifiable {
+    let id: String
+    let title: String
+    var coverImageUrl: String?
+    var coverEmoji: String?
+    var sources: [NuvioCollectionSource]
+    /// Legacy pre-`sources` field still present in old blobs.
+    var catalogSources: [NuvioCollectionCatalogSource]
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(String.self, forKey: .id)
+        title = try c.decode(String.self, forKey: .title)
+        coverImageUrl = try c.decodeIfPresent(String.self, forKey: .coverImageUrl)
+        coverEmoji = try c.decodeIfPresent(String.self, forKey: .coverEmoji)
+        sources = try c.decodeIfPresent([NuvioCollectionSource].self, forKey: .sources) ?? []
+        catalogSources = try c.decodeIfPresent([NuvioCollectionCatalogSource].self, forKey: .catalogSources) ?? []
+    }
+
+    /// Add-on backed catalog sources, merging the modern `sources` array with
+    /// the legacy `catalogSources` field (mirrors the Android accessor).
+    /// TMDB/Trakt sources are skipped — tvOS resolves add-on catalogs only.
+    var addonCatalogSources: [NuvioCollectionCatalogSource] {
+        var merged = sources.compactMap { source -> NuvioCollectionCatalogSource? in
+            guard source.provider.isEmpty || source.provider.lowercased() == "addon",
+                  let addonId = source.addonId,
+                  let type = source.type,
+                  let catalogId = source.catalogId else { return nil }
+            return NuvioCollectionCatalogSource(addonId: addonId, type: type, catalogId: catalogId, genre: source.genre)
+        }
+        merged.append(contentsOf: catalogSources)
+        return merged
+    }
+}
+
+struct NuvioCollectionSource: Codable {
+    var provider: String
+    var addonId: String?
+    var type: String?
+    var catalogId: String?
+    var genre: String?
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        provider = try c.decodeIfPresent(String.self, forKey: .provider) ?? "addon"
+        addonId = try c.decodeIfPresent(String.self, forKey: .addonId)
+        type = try c.decodeIfPresent(String.self, forKey: .type)
+        catalogId = try c.decodeIfPresent(String.self, forKey: .catalogId)
+        genre = try c.decodeIfPresent(String.self, forKey: .genre)
+    }
+}
+
+struct NuvioCollectionCatalogSource: Codable {
+    let addonId: String
+    let type: String
+    let catalogId: String
+    var genre: String?
+
+    init(addonId: String, type: String, catalogId: String, genre: String? = nil) {
+        self.addonId = addonId
+        self.type = type
+        self.catalogId = catalogId
+        self.genre = genre
+    }
+}
+
+/// Per-profile cache of the account's collections. Written only by the sync
+/// pull (Android/phone remain the editors); read by the Home screen.
+enum CollectionsStore {
+    static let changedNotification = Notification.Name("nuvio.tv.collections.changed")
+
+    private static let baseKey = "nuvio.tv.collections.json"
+    private(set) static var activeProfileId: String?
+
+    static func setActiveProfile(_ profileId: String?) {
+        activeProfileId = profileId
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    private static var storageKey: String {
+        guard let id = activeProfileId, !id.isEmpty else { return baseKey }
+        return "\(baseKey).\(id)"
+    }
+
+    static func collections() -> [NuvioCollection] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([NuvioCollection].self, from: data) else {
+            return []
+        }
+        return decoded
+    }
+
+    /// Replaces the cache with the account's blob. Raw data is stored as-is so
+    /// fields tvOS doesn't model yet survive round-trips of the app version.
+    static func applyRemote(_ json: Data) {
+        guard (try? JSONDecoder().decode([NuvioCollection].self, from: json)) != nil else { return }
+        UserDefaults.standard.set(json, forKey: storageKey)
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    /// Posted after a local edit (create/pin/delete/add-source) so the sync
+    /// manager pushes the new blob to the account; object is the raw
+    /// `[[String: Any]]` collections array.
+    static let locallyEditedNotification = Notification.Name("nuvio.tv.collections.locallyEdited")
+
+    /// The stored blob as untyped JSON dictionaries. Local edits mutate these
+    /// dicts instead of the typed models so fields only the Android app knows
+    /// (view modes, tile shapes, TMDB sources, …) survive the round-trip.
+    static func rawCollections() -> [[String: Any]] {
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] else {
+            return []
+        }
+        return rows
+    }
+
+    /// Persists a local edit and asks the sync manager to push it.
+    static func saveLocalEdit(_ raw: [[String: Any]]) {
+        guard let data = try? JSONSerialization.data(withJSONObject: raw),
+              (try? JSONDecoder().decode([NuvioCollection].self, from: data)) != nil else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+        NotificationCenter.default.post(name: locallyEditedNotification, object: raw)
+    }
+
+    /// Deletes every profile's collections on sign-out.
     static func eraseAllProfiles() {
         let defaults = UserDefaults.standard
         defaults.dictionaryRepresentation().keys

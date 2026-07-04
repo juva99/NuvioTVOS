@@ -273,6 +273,7 @@ public class ProfileViewModel: ObservableObject {
             ContinueWatchingStore.setActiveProfile(profile?.id)
             LibraryStore.setActiveProfile(profile?.id)
             WatchedStore.setActiveProfile(profile?.id)
+            CollectionsStore.setActiveProfile(profile?.id)
             ProfileSettings.setActiveProfile(profile?.id)
             self.activeProfile = profile
             return
@@ -283,6 +284,7 @@ public class ProfileViewModel: ObservableObject {
             ContinueWatchingStore.setActiveProfile(profile?.id)
             LibraryStore.setActiveProfile(profile?.id)
             WatchedStore.setActiveProfile(profile?.id)
+            CollectionsStore.setActiveProfile(profile?.id)
             ProfileSettings.setActiveProfile(profile?.id)
             self.activeProfile = profile
         } catch {
@@ -412,6 +414,7 @@ public class ProfileViewModel: ObservableObject {
         ContinueWatchingStore.eraseAllProfiles()
         LibraryStore.eraseAllProfiles()
         WatchedStore.eraseAllProfiles()
+        CollectionsStore.eraseAllProfiles()
         // Cover the whole local id space (1-6 + guest), not just the current
         // list, so suites left behind by previously deleted profiles go too.
         ProfileSettings.eraseAll(profileIds: previousIds + (1...6).map(String.init) + [guest.id])
@@ -420,6 +423,7 @@ public class ProfileViewModel: ObservableObject {
         ContinueWatchingStore.setActiveProfile(nil)
         LibraryStore.setActiveProfile(nil)
         WatchedStore.setActiveProfile(nil)
+        CollectionsStore.setActiveProfile(nil)
         ProfileSettings.clearActiveProfile()
     }
 }

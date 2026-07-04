@@ -29,6 +29,18 @@ class PlayerViewModel: ObservableObject {
     @Published var showControls: Bool = true
     @Published var title: String = ""
     @Published var subtitle: String = ""
+    /// Every external subtitle the stream offered (all languages), browsable in
+    /// the player's subtitle panel and loaded into mpv on demand.
+    @Published var availableExternalSubtitles: [NuvioSubtitle] = []
+    /// Current mpv `sub-delay`, in milliseconds. Per-session, not persisted.
+    @Published var subtitleDelayMs: Int = 0
+    /// Current mpv `audio-delay`, in milliseconds. Per-session, not persisted.
+    @Published var audioDelayMs: Int = 0
+    /// PCM amplification in whole dB (0…10), applied as mpv software volume.
+    /// Per-session, not persisted.
+    @Published var audioAmplificationDb: Int = 0
+    /// Full-screen settings panel (subtitles / audio / speed) visibility.
+    @Published var showSettingsPanel: Bool = false
 
     /// The UIKit view controller that owns the Metal surface MPV renders into.
     /// PlayerView hosts this via a UIViewControllerRepresentable.
@@ -90,8 +102,15 @@ class PlayerViewModel: ObservableObject {
         self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
         self.didDetectReplacementStream = false
         self.replacementStreamHits = 0
-        self.pendingExternalSubtitles = externalSubtitles
-        self.didAddExternalSubtitles = externalSubtitles.isEmpty
+        // The full list stays browsable in the subtitle panel; only smart-matched
+        // ones are eagerly loaded into mpv (loading all would fetch dozens of files).
+        self.availableExternalSubtitles = isTrailerPlayback ? [] : externalSubtitles
+        let smartMatched = isTrailerPlayback ? [] : Self.smartMatchedSubtitles(in: externalSubtitles)
+        self.pendingExternalSubtitles = smartMatched
+        self.didAddExternalSubtitles = smartMatched.isEmpty
+        self.subtitleDelayMs = 0
+        self.audioDelayMs = 0
+        self.audioAmplificationDb = 0
         self.didApplySubtitlePreference = false
         guard !hasLoaded else { return }
         hasLoaded = true
@@ -209,12 +228,14 @@ class PlayerViewModel: ObservableObject {
 
         audioTracks = c.audioTracks.map {
             AudioTrack(id: "\($0.id)", name: $0.title,
-                       language: $0.lang, isSelected: $0.selected)
+                       language: $0.lang, isSelected: $0.selected,
+                       languageName: $0.languageName, detail: $0.detail)
         }
 
         var subs = c.subtitleTracks.map {
             SubtitleTrack(id: "\($0.id)", name: $0.title,
-                          language: $0.lang, isSelected: $0.selected)
+                          language: $0.lang, isSelected: $0.selected,
+                          externalFilename: $0.externalFilename)
         }
         let anySelected = subs.contains { $0.isSelected }
         subs.insert(SubtitleTrack(id: "off", name: "Off", language: "",
@@ -285,6 +306,27 @@ class PlayerViewModel: ObservableObject {
         playerController.applySubtitleStyle()
     }
 
+    /// Shifts subtitle timing; positive shows captions later.
+    func setSubtitleDelayMs(_ ms: Int) {
+        let clamped = min(max(ms, -30_000), 30_000)
+        subtitleDelayMs = clamped
+        playerController.setSubtitleDelay(Double(clamped) / 1000.0)
+    }
+
+    /// Shifts audio timing; positive delays the audio.
+    func setAudioDelayMs(_ ms: Int) {
+        let clamped = min(max(ms, -3_000), 3_000)
+        audioDelayMs = clamped
+        playerController.setAudioDelay(Double(clamped) / 1000.0)
+    }
+
+    /// PCM amplification in whole dB (0…10).
+    func setAudioAmplificationDb(_ db: Int) {
+        let clamped = min(max(db, 0), 10)
+        audioAmplificationDb = clamped
+        playerController.setAudioVolumeGain(dB: Double(clamped))
+    }
+
     // MARK: - Track selection
 
     func selectSubtitle(_ track: SubtitleTrack) {
@@ -294,6 +336,34 @@ class PlayerViewModel: ObservableObject {
             playerController.selectSubtitle(id)
         }
         subtitles = subtitles.map { var t = $0; t.isSelected = (t.id == track.id); return t }
+    }
+
+    /// Selects an external subtitle from the panel: if mpv already loaded this
+    /// URL (eagerly or from an earlier pick) just switch to that track,
+    /// otherwise `sub-add` it now — mpv selects newly added tracks itself.
+    func selectExternalSubtitle(_ subtitle: NuvioSubtitle) {
+        if let track = subtitles.first(where: { $0.externalFilename == subtitle.url }) {
+            selectSubtitle(track)
+        } else {
+            playerController.addSubtitleUrl(subtitle.url)
+        }
+    }
+
+    /// The subset of a stream's external subtitles worth auto-loading into mpv:
+    /// the user's preferred languages, when smart subtitle matching is enabled.
+    private static func smartMatchedSubtitles(in subtitles: [NuvioSubtitle]) -> [NuvioSubtitle] {
+        guard !subtitles.isEmpty,
+              ProfileSettings.current.bool(forKey: SettingsKey.smartSubtitleMatching) else {
+            return []
+        }
+        var seen: Set<String> = []
+        return SubtitleLanguagePreferences.orderedFromDefaults().flatMap { language in
+            subtitles.filter { subtitle in
+                SubtitleLanguagePreferences.matches(subtitle.language, target: language) ||
+                SubtitleLanguagePreferences.matches(subtitle.label, target: language)
+            }
+        }
+        .filter { seen.insert($0.url).inserted }
     }
 
     private func addPendingExternalSubtitlesIfNeeded() {
@@ -584,6 +654,13 @@ struct TrackInfo {
     let title: String
     let lang: String
     let selected: Bool
+    /// mpv `external-filename` — the URL a `sub-add`ed track was loaded from,
+    /// empty for tracks embedded in the container.
+    let externalFilename: String
+    /// Localized language name for audio cards ("Russian"), empty for subs.
+    var languageName: String = ""
+    /// Technical summary for audio cards ("AC-3 | 6 ch | 48 kHz"), empty for subs.
+    var detail: String = ""
 }
 
 // MARK: - Network buffer sizing
@@ -734,6 +811,8 @@ final class MPVPlayerViewController: UIViewController {
         checkError(mpv_set_option_string(mpv, "hwdec", "videotoolbox"))
         checkError(mpv_set_option_string(mpv, "ao", Self.defaultAudioOutput))
         checkError(mpv_set_option_string(mpv, "audio-channels", "auto"))
+        // Headroom for the Audio → Amplification control (+10 dB ≈ 316%).
+        checkError(mpv_set_option_string(mpv, "volume-max", "400"))
         checkError(mpv_set_option_string(mpv, "audio-fallback-to-null", "yes"))
 
         // Network buffering. Stremio/debrid links are bursty and often throttle,
@@ -779,6 +858,13 @@ final class MPVPlayerViewController: UIViewController {
         mpv_observe_property(mpv, 0, "eof-reached", MPV_FORMAT_FLAG)
         mpv_observe_property(mpv, 0, "seeking", MPV_FORMAT_FLAG)
         mpv_observe_property(mpv, 0, "track-list/count", MPV_FORMAT_INT64)
+        // Selecting a different audio/subtitle track leaves the track *count*
+        // unchanged, so those alone wouldn't refresh the cached track list and
+        // the panel's checkmark would snap back to the old track. Observing the
+        // active ids (they can be "no"/"auto", hence STRING) fires a refresh the
+        // moment a selection actually changes. See `refreshTracks`.
+        mpv_observe_property(mpv, 0, "aid", MPV_FORMAT_STRING)
+        mpv_observe_property(mpv, 0, "sid", MPV_FORMAT_STRING)
 
         mpv_set_wakeup_callback(mpv, { ctx in
             let vc = unsafeBitCast(ctx, to: MPVPlayerViewController.self)
@@ -857,6 +943,29 @@ final class MPVPlayerViewController: UIViewController {
     func setMuted(_ muted: Bool) {
         guard mpv != nil else { return }
         setFlag("mute", muted)
+    }
+
+    /// mpv `sub-delay`, in seconds; positive shows captions later.
+    func setSubtitleDelay(_ seconds: Double) {
+        guard mpv != nil else { return }
+        var value = seconds
+        mpv_set_property(mpv, "sub-delay", MPV_FORMAT_DOUBLE, &value)
+    }
+
+    /// mpv `audio-delay`, in seconds; positive delays the audio.
+    func setAudioDelay(_ seconds: Double) {
+        guard mpv != nil else { return }
+        var value = seconds
+        mpv_set_property(mpv, "audio-delay", MPV_FORMAT_DOUBLE, &value)
+    }
+
+    /// PCM software amplification, expressed in dB. mpv's `volume` is a linear
+    /// percentage (100 = unchanged), so convert: percent = 10^(dB/20) · 100.
+    /// `volume-max` is raised at init so the full +10 dB (~316%) is allowed.
+    func setAudioVolumeGain(dB: Double) {
+        guard mpv != nil else { return }
+        var value = pow(10.0, dB / 20.0) * 100.0
+        mpv_set_property(mpv, "volume", MPV_FORMAT_DOUBLE, &value)
     }
 
     // MARK: - Track selection
@@ -971,16 +1080,24 @@ final class MPVPlayerViewController: UIViewController {
             let codec = getTrackString(i, "codec")
             let channelCount = getInt("track-list/\(i)/demux-channel-count")
             let selected = getFlag("track-list/\(i)/selected")
+            let externalFilename = getTrackString(i, "external-filename")
 
             if type == "audio" {
-                let display = trackTitle(title: title, lang: lang, codec: codec,
-                                         channelCount: channelCount, fallback: "Track \(audioIdx + 1)")
-                audio.append(TrackInfo(index: audioIdx, id: id, type: type, title: display, lang: lang, selected: selected))
+                let sampleRate = getInt("track-list/\(i)/demux-samplerate")
+                let languageName = Self.localizedLanguageName(lang)
+                let display = Self.audioTrackName(title: title, languageName: languageName,
+                                                  codec: codec, channelCount: channelCount,
+                                                  fallback: "Track \(audioIdx + 1)")
+                let detail = Self.audioTrackDetail(codec: codec, channels: channelCount, sampleRate: sampleRate)
+                audio.append(TrackInfo(index: audioIdx, id: id, type: type, title: display, lang: lang,
+                                       selected: selected, externalFilename: externalFilename,
+                                       languageName: languageName, detail: detail))
                 audioIdx += 1
             } else if type == "sub" {
                 let display = trackTitle(title: title, lang: lang, codec: codec,
                                          channelCount: 0, fallback: "Subtitle \(subIdx + 1)")
-                subs.append(TrackInfo(index: subIdx, id: id, type: type, title: display, lang: lang, selected: selected))
+                subs.append(TrackInfo(index: subIdx, id: id, type: type, title: display, lang: lang,
+                                      selected: selected, externalFilename: externalFilename))
                 subIdx += 1
             }
         }
@@ -1011,6 +1128,71 @@ final class MPVPlayerViewController: UIViewController {
         if !codec.isEmpty { details.append(codec.uppercased()) }
         let filtered = details.filter { !base.localizedCaseInsensitiveContains($0) }
         return filtered.isEmpty ? base : "\(base) (\(filtered.joined(separator: ", ")))"
+    }
+
+    /// Audio card title: the track's own name (or language) with a codec +
+    /// channel-layout summary in parens — "LostFilm (AC-3 Stereo)".
+    private static func audioTrackName(title: String, languageName: String,
+                                       codec: String, channelCount: Int, fallback: String) -> String {
+        let base: String
+        if !title.isEmpty { base = title }
+        else if !languageName.isEmpty { base = languageName }
+        else { base = fallback }
+
+        let summary = [prettyCodec(codec), channelLayout(channelCount)]
+            .filter { !$0.isEmpty }
+            .joined(separator: " ")
+        return summary.isEmpty ? base : "\(base) (\(summary))"
+    }
+
+    /// Audio card detail line — "AC-3 | 6 ch | 48 kHz". Omits missing pieces.
+    private static func audioTrackDetail(codec: String, channels: Int, sampleRate: Int) -> String {
+        var parts: [String] = []
+        let pretty = prettyCodec(codec)
+        if !pretty.isEmpty { parts.append(pretty) }
+        if channels > 0 { parts.append("\(channels) ch") }
+        if sampleRate > 0 { parts.append("\(Int((Double(sampleRate) / 1000.0).rounded())) kHz") }
+        return parts.joined(separator: " | ")
+    }
+
+    private static func localizedLanguageName(_ lang: String) -> String {
+        let trimmed = lang.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if let name = Locale.current.localizedString(forLanguageCode: trimmed.lowercased()) {
+            return name.prefix(1).uppercased() + name.dropFirst()
+        }
+        return trimmed.prefix(1).uppercased() + trimmed.dropFirst()
+    }
+
+    /// Human channel layout name; falls back to a raw count.
+    private static func channelLayout(_ count: Int) -> String {
+        switch count {
+        case 1: return "Mono"
+        case 2: return "Stereo"
+        case 6: return "5.1"
+        case 8: return "7.1"
+        case let n where n > 0: return "\(n)ch"
+        default: return ""
+        }
+    }
+
+    /// Displays common audio codecs the way listeners recognize them.
+    private static func prettyCodec(_ codec: String) -> String {
+        switch codec.lowercased() {
+        case "ac3": return "AC-3"
+        case "eac3": return "E-AC-3"
+        case "dts": return "DTS"
+        case "dts-hd", "dtshd": return "DTS-HD"
+        case "truehd": return "TrueHD"
+        case "aac": return "AAC"
+        case "flac": return "FLAC"
+        case "opus": return "Opus"
+        case "vorbis": return "Vorbis"
+        case "mp3": return "MP3"
+        case "pcm", "pcm_s16le", "pcm_s24le": return "PCM"
+        case "": return ""
+        default: return codec.uppercased()
+        }
     }
 
     // MARK: - HDR display mode switching

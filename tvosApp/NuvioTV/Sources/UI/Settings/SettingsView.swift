@@ -55,6 +55,12 @@ enum SettingsKey {
     static let reduceMotion = "nuvio.tv.settings.appearance.reduceMotion"
 
     static let homeLayout = "nuvio.tv.settings.layout.homeLayout"
+    /// JSON `[String]` of home section ids in the user's preferred order.
+    static let homeCatalogOrder = "nuvio.tv.settings.layout.homeCatalogOrder"
+    /// JSON `[String: String]` snapshot of section id → title, written by Home
+    /// on every load so the Settings reorder list knows the display names.
+    /// Local-only derived data (not part of `all`).
+    static let homeCatalogTitles = "nuvio.tv.settings.layout.homeCatalogTitles"
     static let heroEnabled = "nuvio.tv.settings.layout.heroEnabled"
     static let posterLabels = "nuvio.tv.settings.layout.posterLabels"
     static let catalogAddonNames = "nuvio.tv.settings.layout.catalogAddonNames"
@@ -717,28 +723,15 @@ private struct AccountSettingsView: View {
                 }
                 .padding(.bottom, 6)
 
-                if isAuthenticated {
-                    SettingsTextFieldRow(
-                        title: "Local Fallback Name",
-                        subtitle: "Used only before a synced profile name is available",
-                        placeholder: "Nuvio User",
-                        text: $profileName
-                    )
-                    .settingsEntryAnchor()
-                } else {
-                    SettingsInfoRow(title: "Local Fallback Name", value: "Nuvio Guest")
-                }
-
-                // When signed out the row above is a non-focusable info row, so
-                // the entry anchor moves here — otherwise the entry lock leaves
-                // the pane with no focusable row and it can't be entered at all.
+                // First focusable row in the pane carries the entry anchor —
+                // without one the entry lock leaves the pane unenterable.
                 SettingsToggleRow(
                     title: "PIN Protection",
                     subtitle: "Require the profile PIN before opening protected profiles",
                     isOn: $pinEnabled,
                     accentColor: accentColor
                 )
-                .settingsEntryAnchor(!isAuthenticated)
+                .settingsEntryAnchor()
 
                 SettingsToggleRow(
                     title: "Open Last Profile",
@@ -926,6 +919,10 @@ private struct LayoutDiscoverySettingsView: View {
                     accentColor: accentColor
                 )
             }
+
+            HomeCatalogOrderSection(accentColor: accentColor)
+
+            CollectionsSettingsSection(accentColor: accentColor)
 
             SettingsGroup(title: "Discovery", subtitle: "Visibility rules for discovery and continue watching") {
                 SettingsOptionRow(
@@ -1862,8 +1859,14 @@ private struct AddonsSettingsSection: View {
             )
             .settingsEntryAnchor()
 
-            ForEach(syncedAddons) { addon in
-                SyncedAddonSettingsRow(addon: addon, accentColor: accentColor)
+            ForEach(Array(syncedAddons.enumerated()), id: \.element.id) { index, addon in
+                SyncedAddonSettingsRow(
+                    addon: addon,
+                    accentColor: accentColor,
+                    canMoveUp: index > 0,
+                    canMoveDown: index < syncedAddons.count - 1,
+                    onMove: { up in moveAddon(at: index, up: up) }
+                )
             }
 
             ForEach($addons) { $addon in
@@ -1879,12 +1882,33 @@ private struct AddonsSettingsSection: View {
         }
     }
 
+    /// Reorders the configured manifests, rewrites the settings the repository
+    /// reads (order = stream priority and Home row order), and pushes the new
+    /// order to the account so the next sync pull can't revert it.
+    private func moveAddon(at index: Int, up: Bool) {
+        let target = up ? index - 1 : index + 1
+        guard syncedAddons.indices.contains(index), syncedAddons.indices.contains(target) else { return }
+        syncedAddons.swapAt(index, target)
+
+        let urls = syncedAddons.map { $0.url.absoluteString }
+        streamAddonManifestURL = urls.first ?? ""
+        streamAddonManifestURLs = urls.joined(separator: "\n")
+        NotificationCenter.default.post(
+            name: NuvioSyncManager.addonOrderChangedNotification,
+            object: urls
+        )
+    }
+
     /// Lists every configured/synced manifest immediately (named by host), then
     /// upgrades each row with the real name/version/description from its
     /// manifest as the fetches come back.
     private func loadSyncedAddons() async {
         let urls = CinemetaCatalogRepository.configuredStreamAddonManifestURLs
-        var resolved = urls.map { SyncedAddon(url: $0) }
+        // Keep already-resolved names/descriptions (e.g. across a reorder) so
+        // rows don't flash back to host-derived names.
+        var resolved = urls.map { url in
+            syncedAddons.first { $0.url == url } ?? SyncedAddon(url: url)
+        }
         syncedAddons = resolved
 
         for index in resolved.indices {
@@ -1968,10 +1992,29 @@ struct StremioManifest: Decodable {
 private struct SyncedAddonSettingsRow: View {
     let addon: SyncedAddon
     let accentColor: Color
+    var canMoveUp: Bool = false
+    var canMoveDown: Bool = false
+    /// Called with `true` for up, `false` for down. nil hides the arrows.
+    var onMove: ((Bool) -> Void)? = nil
 
     @FocusState private var isFocused: Bool
 
     var body: some View {
+        HStack(spacing: 14) {
+            rowButton
+
+            if let onMove {
+                AddonReorderButton(systemImage: "chevron.up", disabled: !canMoveUp) {
+                    onMove(true)
+                }
+                AddonReorderButton(systemImage: "chevron.down", disabled: !canMoveDown) {
+                    onMove(false)
+                }
+            }
+        }
+    }
+
+    private var rowButton: some View {
         Button(action: {}) {
             SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
                 Image(systemName: "arrow.triangle.2.circlepath")
@@ -2012,6 +2055,453 @@ private struct SyncedAddonSettingsRow: View {
         .focused($isFocused)
         .focusEffectDisabledIfAvailable()
         .entryLockable()
+    }
+}
+
+/// Chevron button for moving an add-on up/down in the priority order.
+private struct AddonReorderButton: View {
+    let systemImage: String
+    let disabled: Bool
+    let action: () -> Void
+
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(.system(size: 20, weight: .bold))
+                .foregroundColor(focused ? .black : .white.opacity(0.8))
+                .frame(width: 52, height: 52)
+                .background(focused ? Color.white : Color.white.opacity(0.1))
+                .clipShape(Circle())
+                .opacity(disabled ? 0.35 : 1)
+                .scaleEffect(focused && !disabled ? 1.08 : 1)
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .disabled(disabled)
+        .focused($focused)
+        .focusEffectDisabledIfAvailable()
+        .animation(.easeOut(duration: 0.12), value: focused)
+        .entryLockable()
+    }
+}
+
+// MARK: - Home catalog reordering
+
+/// Settings → Layout → Home Catalogs: reorder the rows Home shows. The list
+/// comes from the snapshot Home writes on every load; moves persist to the
+/// active profile's settings and re-apply to a mounted Home immediately.
+private struct HomeCatalogOrderSection: View {
+    let accentColor: Color
+    @State private var rows: [(id: String, title: String)] = []
+
+    var body: some View {
+        SettingsGroup(title: "Home Catalogs", subtitle: "Controls catalog and collection row order on Home") {
+            if rows.isEmpty {
+                SettingsInfoRow(title: "No rows recorded yet", value: "Open Home once")
+            } else {
+                ForEach(Array(rows.enumerated()), id: \.element.id) { index, row in
+                    HomeCatalogOrderRow(
+                        title: row.title,
+                        accentColor: accentColor,
+                        canMoveUp: index > 0,
+                        canMoveDown: index < rows.count - 1
+                    ) { up in
+                        move(index, up: up)
+                    }
+                }
+            }
+        }
+        .onAppear { rows = TVHomeCatalogOrder.snapshotRows() }
+    }
+
+    private func move(_ index: Int, up: Bool) {
+        let target = up ? index - 1 : index + 1
+        guard rows.indices.contains(index), rows.indices.contains(target) else { return }
+        rows.swapAt(index, target)
+        TVHomeCatalogOrder.save(rows.map(\.id))
+        TVHomeCatalogOrder.writeSnapshotRows(rows)
+    }
+}
+
+private struct HomeCatalogOrderRow: View {
+    let title: String
+    let accentColor: Color
+    let canMoveUp: Bool
+    let canMoveDown: Bool
+    let onMove: (Bool) -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Button(action: {}) {
+                SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                    Image(systemName: "line.3.horizontal")
+                        .font(.system(size: 24))
+                        .foregroundColor(accentColor)
+                        .frame(width: 48, height: 48)
+
+                    Text(title)
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+
+                    Spacer(minLength: 20)
+                }
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focused($isFocused)
+            .focusEffectDisabledIfAvailable()
+            .entryLockable()
+
+            AddonReorderButton(systemImage: "chevron.up", disabled: !canMoveUp) { onMove(true) }
+            AddonReorderButton(systemImage: "chevron.down", disabled: !canMoveDown) { onMove(false) }
+        }
+    }
+}
+
+// MARK: - Collections manager
+
+/// Settings → Layout → Collections: view, create, pin, and delete the
+/// account's collections and attach add-on catalogs to them. Edits mutate the
+/// raw synced JSON (so Android-only fields survive) and push to the account.
+private struct CollectionsSettingsSection: View {
+    let accentColor: Color
+
+    @State private var collections: [[String: Any]] = []
+    @State private var showingCreate = false
+    @State private var pickerTarget: CollectionPickerTarget?
+
+    var body: some View {
+        SettingsGroup(title: "Collections", subtitle: "Group catalogs into folders on your home screen") {
+            ForEach(Array(collections.enumerated()), id: \.offset) { index, collection in
+                CollectionSettingsRow(
+                    name: (collection["title"] as? String) ?? "Untitled",
+                    detail: detailText(for: collection),
+                    isPinned: (collection["pinToTop"] as? Bool) ?? false,
+                    accentColor: accentColor,
+                    onAddCatalog: { pickerTarget = CollectionPickerTarget(index: index) },
+                    onTogglePin: { togglePin(index) },
+                    onDelete: { remove(index) }
+                )
+            }
+
+            CreateCollectionRow(accentColor: accentColor) {
+                showingCreate = true
+            }
+        }
+        .onAppear { collections = CollectionsStore.rawCollections() }
+        .onReceive(NotificationCenter.default.publisher(for: CollectionsStore.changedNotification)) { _ in
+            collections = CollectionsStore.rawCollections()
+        }
+        .sheet(isPresented: $showingCreate) {
+            CreateCollectionSheet { name in
+                create(named: name)
+            }
+        }
+        .sheet(item: $pickerTarget) { target in
+            CollectionCatalogPickerSheet(
+                collectionName: (collections[safe: target.index]?["title"] as? String) ?? "",
+                selectedIds: selectedSourceIds(at: target.index),
+                onToggle: { option in toggleSource(option, at: target.index) }
+            )
+        }
+    }
+
+    private func detailText(for collection: [String: Any]) -> String {
+        let folders = (collection["folders"] as? [[String: Any]]) ?? []
+        let sourceCount = folders.reduce(0) { $0 + ((($1["sources"] as? [[String: Any]])?.count) ?? 0) }
+        let folderText = "\(folders.count) folder\(folders.count == 1 ? "" : "s")"
+        return "\(folderText) • \(sourceCount) catalog\(sourceCount == 1 ? "" : "s")"
+    }
+
+    private func create(named name: String) {
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        collections.append([
+            "id": UUID().uuidString,
+            "title": trimmed,
+            "pinToTop": false,
+            "viewMode": "TABBED_GRID",
+            "showAllTab": true,
+            "folders": [[
+                "id": UUID().uuidString,
+                "title": trimmed,
+                "tileShape": "SQUARE",
+                "hideTitle": false,
+                "sources": [[String: Any]]()
+            ]]
+        ])
+        CollectionsStore.saveLocalEdit(collections)
+    }
+
+    private func togglePin(_ index: Int) {
+        guard collections.indices.contains(index) else { return }
+        let pinned = (collections[index]["pinToTop"] as? Bool) ?? false
+        collections[index]["pinToTop"] = !pinned
+        CollectionsStore.saveLocalEdit(collections)
+    }
+
+    private func remove(_ index: Int) {
+        guard collections.indices.contains(index) else { return }
+        collections.remove(at: index)
+        CollectionsStore.saveLocalEdit(collections)
+    }
+
+    /// Sources already attached anywhere in the collection, as option ids.
+    private func selectedSourceIds(at index: Int) -> Set<String> {
+        guard let folders = collections[safe: index]?["folders"] as? [[String: Any]] else { return [] }
+        var ids = Set<String>()
+        for folder in folders {
+            for source in (folder["sources"] as? [[String: Any]]) ?? [] {
+                if let addonId = source["addonId"] as? String,
+                   let type = source["type"] as? String,
+                   let catalogId = source["catalogId"] as? String {
+                    ids.insert("\(addonId)_\(type)_\(catalogId)")
+                }
+            }
+        }
+        return ids
+    }
+
+    /// Adds/removes the catalog in the collection's first folder (created on
+    /// demand), leaving every other field of the JSON untouched.
+    private func toggleSource(_ option: AddonCatalogOption, at index: Int) {
+        guard collections.indices.contains(index) else { return }
+        var folders = (collections[index]["folders"] as? [[String: Any]]) ?? []
+        if folders.isEmpty {
+            folders = [[
+                "id": UUID().uuidString,
+                "title": (collections[index]["title"] as? String) ?? "Folder",
+                "tileShape": "SQUARE",
+                "hideTitle": false,
+                "sources": [[String: Any]]()
+            ]]
+        }
+
+        let matches: ([String: Any]) -> Bool = { source in
+            source["addonId"] as? String == option.addonId
+                && source["type"] as? String == option.type
+                && source["catalogId"] as? String == option.catalogId
+        }
+
+        if selectedSourceIds(at: index).contains(option.id) {
+            for folderIndex in folders.indices {
+                var sources = (folders[folderIndex]["sources"] as? [[String: Any]]) ?? []
+                sources.removeAll(where: matches)
+                folders[folderIndex]["sources"] = sources
+            }
+        } else {
+            var sources = (folders[0]["sources"] as? [[String: Any]]) ?? []
+            sources.append([
+                "provider": "addon",
+                "addonId": option.addonId,
+                "type": option.type,
+                "catalogId": option.catalogId
+            ])
+            folders[0]["sources"] = sources
+        }
+
+        collections[index]["folders"] = folders
+        CollectionsStore.saveLocalEdit(collections)
+    }
+}
+
+private struct CollectionPickerTarget: Identifiable {
+    let index: Int
+    var id: Int { index }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        indices.contains(index) ? self[index] : nil
+    }
+}
+
+private struct CollectionSettingsRow: View {
+    let name: String
+    let detail: String
+    let isPinned: Bool
+    let accentColor: Color
+    let onAddCatalog: () -> Void
+    let onTogglePin: () -> Void
+    let onDelete: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        HStack(spacing: 14) {
+            Button(action: onAddCatalog) {
+                SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                    Image(systemName: "folder")
+                        .font(.system(size: 24))
+                        .foregroundColor(accentColor)
+                        .frame(width: 48, height: 48)
+
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text(name)
+                                .font(.system(size: 22, weight: .semibold))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                            if isPinned {
+                                Text("PINNED")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundColor(accentColor)
+                            }
+                        }
+                        Text("\(detail) — click to add catalogs")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundColor(.white.opacity(0.56))
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 20)
+                }
+            }
+            .buttonStyle(PosterCardButtonStyle())
+            .focused($isFocused)
+            .focusEffectDisabledIfAvailable()
+            .entryLockable()
+
+            AddonReorderButton(systemImage: isPinned ? "pin.slash" : "pin", disabled: false, action: onTogglePin)
+            AddonReorderButton(systemImage: "trash", disabled: false, action: onDelete)
+        }
+    }
+}
+
+private struct CreateCollectionRow: View {
+    let accentColor: Color
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 24))
+                    .foregroundColor(accentColor)
+                    .frame(width: 48, height: 48)
+
+                Text("New Collection")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(.white)
+
+                Spacer(minLength: 20)
+            }
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .entryLockable()
+    }
+}
+
+private struct CreateCollectionSheet: View {
+    let onCreate: (String) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+
+    var body: some View {
+        VStack(spacing: 28) {
+            Text("New Collection")
+                .font(.system(size: 38, weight: .bold))
+                .foregroundColor(.white)
+
+            TextField("Collection name", text: $name)
+                .frame(maxWidth: 700)
+
+            HStack(spacing: 20) {
+                Button("Create") {
+                    onCreate(name)
+                    dismiss()
+                }
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+                Button("Cancel") { dismiss() }
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.92).ignoresSafeArea())
+    }
+}
+
+private struct CollectionCatalogPickerSheet: View {
+    let collectionName: String
+    /// Ids of already-attached options at presentation time.
+    let selectedIds: Set<String>
+    let onToggle: (AddonCatalogOption) -> Void
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var options: [AddonCatalogOption] = []
+    @State private var localSelected: Set<String> = []
+    @State private var isLoading = true
+
+    var body: some View {
+        VStack(spacing: 24) {
+            Text("Add Catalogs to \(collectionName)")
+                .font(.system(size: 34, weight: .bold))
+                .foregroundColor(.white)
+                .lineLimit(1)
+
+            if isLoading {
+                ProgressView().tint(.white)
+                    .frame(maxHeight: .infinity)
+            } else if options.isEmpty {
+                Text("No add-on catalogs available. Install add-ons with catalogs first.")
+                    .font(.system(size: 22))
+                    .foregroundColor(.white.opacity(0.6))
+                    .frame(maxHeight: .infinity)
+            } else {
+                ScrollView {
+                    VStack(spacing: 12) {
+                        ForEach(options) { option in
+                            Button {
+                                if localSelected.contains(option.id) {
+                                    localSelected.remove(option.id)
+                                } else {
+                                    localSelected.insert(option.id)
+                                }
+                                onToggle(option)
+                            } label: {
+                                HStack(spacing: 14) {
+                                    Image(systemName: localSelected.contains(option.id) ? "checkmark.circle.fill" : "circle")
+                                        .font(.system(size: 24))
+                                        .foregroundColor(localSelected.contains(option.id) ? .green : .white.opacity(0.4))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(option.catalogName)
+                                            .font(.system(size: 22, weight: .semibold))
+                                            .foregroundColor(.white)
+                                            .lineLimit(1)
+                                        Text("\(option.addonName) • \(option.type.capitalized)")
+                                            .font(.system(size: 16, weight: .medium))
+                                            .foregroundColor(.white.opacity(0.56))
+                                            .lineLimit(1)
+                                    }
+                                    Spacer()
+                                }
+                                .padding(.horizontal, 24)
+                                .padding(.vertical, 14)
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 80)
+                }
+            }
+
+            Button("Done") { dismiss() }
+        }
+        .padding(.vertical, 60)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(Color.black.opacity(0.92).ignoresSafeArea())
+        .task {
+            localSelected = selectedIds
+            options = await CinemetaCatalogRepository().availableAddonCatalogs()
+            isLoading = false
+        }
     }
 }
 

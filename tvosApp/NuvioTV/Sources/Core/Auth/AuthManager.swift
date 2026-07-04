@@ -47,8 +47,27 @@ final class AuthManager: ObservableObject {
         !isAuthenticated && !store.didSkipLogin
     }
 
+    /// Present in UserDefaults for as long as this install exists. UserDefaults
+    /// dies with an app deletion but the Keychain does not, so a missing marker
+    /// means a fresh install carrying a previous install's session.
+    private static let installMarkerKey = "nuvio.auth.installMarker"
+
     init() {
+        clearLeftoverSessionOnFreshInstall()
         restoreSession()
+    }
+
+    /// Deleting the app must mean a clean slate: without this, a reinstall
+    /// restores the old account from the surviving Keychain item while every
+    /// bit of local state (profiles, add-ons, watch data) is gone — a
+    /// half-signed-in limbo. First launch of a fresh install drops any
+    /// leftover session so the login gate shows.
+    private func clearLeftoverSessionOnFreshInstall() {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: Self.installMarkerKey) else { return }
+        defaults.set(true, forKey: Self.installMarkerKey)
+        store.clear()
+        store.didSkipLogin = false
     }
 
     // MARK: - Session restore / persistence

@@ -12,6 +12,12 @@ import Foundation
 
 @MainActor
 final class NuvioSyncManager: ObservableObject {
+    /// Posted by the Settings add-on list after a reorder; object is the new
+    /// `[String]` of manifest URLs. Triggers a `sync_push_addons` so the order
+    /// reaches the account (and the Android app) instead of being reverted by
+    /// the next pull.
+    static let addonOrderChangedNotification = Notification.Name("nuvio.tv.addons.orderChanged")
+
     /// True from sign-in until the first profile pull has been applied (or the
     /// pull fails), so the who's-watching screen can wait for real profile
     /// names instead of rendering local stubs.
@@ -19,11 +25,17 @@ final class NuvioSyncManager: ObservableObject {
 
     private let client = SupabaseSyncClient()
 
+    /// Full remote addon rows from the last pull — including disabled add-ons
+    /// and custom names that tvOS doesn't render. `sync_push_addons` replaces
+    /// the whole set, so a reorder must round-trip these untouched.
+    private var lastPulledAddonRows: [RemoteAddon] = []
+
     private weak var authManager: AuthManager?
     private weak var profileViewModel: ProfileViewModel?
     private var observers: [NSObjectProtocol] = []
     private var pullTask: Task<Void, Never>?
     private var pushTask: Task<Void, Never>?
+    private var profileBackfillTask: Task<Void, Never>?
     private var completedInitialPullKeys: Set<String> = []
     private var isApplyingRemote = false
     private var didAttach = false
@@ -74,6 +86,22 @@ final class NuvioSyncManager: ObservableObject {
         ) { [weak self] _ in
             Task { @MainActor in self?.schedulePush() }
         })
+        observers.append(center.addObserver(
+            forName: Self.addonOrderChangedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let urls = notification.object as? [String] ?? []
+            Task { @MainActor in self?.pushAddonOrder(urls) }
+        })
+        observers.append(center.addObserver(
+            forName: CollectionsStore.locallyEditedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] notification in
+            let raw = notification.object as? [[String: Any]] ?? []
+            Task { @MainActor in self?.pushCollectionsEdit(raw) }
+        })
     }
 
     func authStateChanged(_ state: AuthState) {
@@ -86,6 +114,7 @@ final class NuvioSyncManager: ObservableObject {
         case .signedOut:
             pullTask?.cancel()
             pushTask?.cancel()
+            profileBackfillTask?.cancel()
             completedInitialPullKeys.removeAll()
             isPullingAccountProfiles = false
         case .loading:
@@ -144,8 +173,23 @@ final class NuvioSyncManager: ObservableObject {
         guard let session = await authManager.validSessionForSync() else { return }
 
         do {
-            let remoteProfiles = try await client.pullProfiles(session: session)
+            // The read right after a fresh login often fails transiently —
+            // either an empty result OR a thrown 401/permission error — the
+            // just-issued token racing the backend. Relaunches never hit it.
+            // Retry with backoff, swallowing transient throws, before concluding
+            // the account is fresh; acting on a false-empty (or a swallowed
+            // throw) is what shows the local placeholder on who's-watching. The
+            // sync wait screen covers the delay.
+            var remoteProfiles: [RemoteProfile] = (try? await client.pullProfiles(session: session)) ?? []
+            var attempt = 0
+            while remoteProfiles.isEmpty && attempt < 3 {
+                attempt += 1
+                try await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000)
+                try ensureStillSyncing()
+                remoteProfiles = (try? await client.pullProfiles(session: session)) ?? []
+            }
             try ensureStillSyncing()
+            print("Nuvio sync pulled \(remoteProfiles.count) profile(s) after \(attempt) retry attempt(s).")
             if !remoteProfiles.isEmpty {
                 let merged = ProfileSyncIndexStore.localProfiles(
                     from: remoteProfiles,
@@ -154,11 +198,24 @@ final class NuvioSyncManager: ObservableObject {
                 isApplyingRemote = true
                 profileViewModel.applyRemoteProfiles(merged)
                 isApplyingRemote = false
-            } else if !profileViewModel.profiles.isEmpty {
+                // Real profiles are in — no need for any in-flight backfill.
+                profileBackfillTask?.cancel()
+            } else if profileViewModel.profiles.contains(where: { !Self.isPlaceholderProfile($0) }) {
+                // Seed the account only with profiles the user actually made.
+                // Pushing the untouched "Nuvio Guest" seed here would rename
+                // the account's primary profile if the empty read was false.
                 try await client.pushProfiles(
                     session: session,
                     profiles: profileViewModel.profiles
                 )
+            } else {
+                // The read came back empty while we hold only the local
+                // placeholder — almost always the just-issued token racing the
+                // backend, not a truly empty account. Releasing the gate now
+                // shows who's-watching with the placeholder card; keep pulling
+                // in the background so the account's real profiles replace it
+                // live, without the user having to pick a profile and come back.
+                startProfileBackfill()
             }
             isPullingAccountProfiles = false
 
@@ -192,6 +249,7 @@ final class NuvioSyncManager: ObservableObject {
                     remoteProfileId: remoteProfileId
                 )
                 try ensureStillSyncing()
+                lastPulledAddonRows = remoteAddons
                 if !remoteAddons.isEmpty {
                     let appliedCount = client.applyAddons(remoteAddons, localProfileId: activeProfile.id)
                     print("Nuvio sync pulled \(appliedCount) enabled add-on(s).")
@@ -200,6 +258,21 @@ final class NuvioSyncManager: ObservableObject {
                 throw CancellationError()
             } catch {
                 print("Nuvio add-on sync failed: \(error.localizedDescription)")
+            }
+
+            do {
+                if let collectionsBlob = try await client.pullCollections(
+                    session: session,
+                    remoteProfileId: remoteProfileId
+                ) {
+                    try ensureStillSyncing()
+                    CollectionsStore.applyRemote(collectionsBlob)
+                    print("Nuvio sync pulled collections (\(collectionsBlob.count) bytes).")
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                print("Nuvio collections sync failed: \(error.localizedDescription)")
             }
 
             // Pull each watch-state collection independently so one failing
@@ -257,9 +330,95 @@ final class NuvioSyncManager: ObservableObject {
                 completedInitialPullKeys.insert(key)
             }
             await pushLocalSnapshots()
+        } catch is CancellationError {
+            isApplyingRemote = false
         } catch {
             isApplyingRemote = false
             print("Nuvio sync failed: \(error.localizedDescription)")
+            // A throw before profiles landed (e.g. the initial read racing a
+            // just-issued token) would otherwise leave who's-watching on the
+            // local placeholder. Keep pulling in the background so the account's
+            // real profiles replace it live. No-op once real profiles exist.
+            if profileViewModel.profiles.allSatisfy(Self.isPlaceholderProfile) {
+                startProfileBackfill()
+            }
+        }
+    }
+
+    /// Re-pulls account profiles a few times after the initial post-login pull
+    /// came back empty. That first read often races a just-issued token and
+    /// returns nothing even though the account has profiles; the who's-watching
+    /// screen would then be left showing the local "Nuvio Guest" placeholder
+    /// until the user picks a profile (which triggers a fresh pull) and returns.
+    /// This keeps trying quietly — `applyRemoteProfiles` publishes into the
+    /// live-observed profile list, so the real cards appear in place. A truly
+    /// empty account simply keeps reading empty and the loop exits with no
+    /// visible change.
+    private func startProfileBackfill() {
+        profileBackfillTask?.cancel()
+        print("Nuvio sync starting profile backfill (post-login read yielded no profiles).")
+        profileBackfillTask = Task { @MainActor [weak self] in
+            // Backoff between attempts (seconds); spans ~55s so a slow backend
+            // that only makes a fresh account's profiles readable well after
+            // the token is issued still gets caught.
+            let delays: [UInt64] = [2, 3, 4, 6, 8, 10, 10, 12]
+            for seconds in delays {
+                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                guard let self else { return }
+                guard (try? self.ensureStillSyncing()) != nil else { return }
+                guard let authManager = self.authManager,
+                      let profileViewModel = self.profileViewModel else { return }
+                // The user picked a profile (or a later pull imported them), so
+                // real profiles are already present — nothing left to backfill.
+                if profileViewModel.profiles.contains(where: { !Self.isPlaceholderProfile($0) }) {
+                    return
+                }
+                guard let session = await authManager.validSessionForSync() else { return }
+                guard (try? self.ensureStillSyncing()) != nil else { return }
+                let remote = (try? await self.client.pullProfiles(session: session)) ?? []
+                guard !remote.isEmpty else {
+                    print("Nuvio sync profile backfill attempt still empty.")
+                    continue
+                }
+                let merged = ProfileSyncIndexStore.localProfiles(
+                    from: remote,
+                    preserving: profileViewModel.profiles
+                )
+                self.isApplyingRemote = true
+                profileViewModel.applyRemoteProfiles(merged)
+                self.isApplyingRemote = false
+                print("Nuvio sync backfilled \(remote.count) profile(s) into who's-watching.")
+                return
+            }
+            print("Nuvio sync profile backfill gave up after \(delays.count) attempts.")
+        }
+    }
+
+    /// Pushes a locally edited collections blob to the account (same
+    /// `sync_push_collections` contract as Android).
+    private func pushCollectionsEdit(_ raw: [[String: Any]]) {
+        guard AuthConfig.isConfigured else { return }
+        guard let authManager, authManager.isAuthenticated else { return }
+        guard let profileViewModel,
+              let activeProfile = profileViewModel.activeProfile ?? profileViewModel.profiles.first else { return }
+
+        let remoteProfileId = ProfileSyncIndexStore.remoteId(
+            for: activeProfile,
+            in: profileViewModel.profiles
+        )
+
+        Task { @MainActor [weak self] in
+            guard let self, let session = await authManager.validSessionForSync() else { return }
+            do {
+                try await self.client.pushCollections(
+                    session: session,
+                    remoteProfileId: remoteProfileId,
+                    rawCollections: raw
+                )
+                print("Nuvio sync pushed \(raw.count) collection(s).")
+            } catch {
+                print("Nuvio collections push failed: \(error.localizedDescription)")
+            }
         }
     }
 
@@ -301,6 +460,58 @@ final class NuvioSyncManager: ObservableObject {
         }
     }
 
+    /// Pushes a reordered add-on list to the account. Enabled add-ons take the
+    /// new order; disabled rows and custom names from the last pull are
+    /// appended untouched so the full-set replace can't drop them.
+    private func pushAddonOrder(_ urls: [String]) {
+        guard !urls.isEmpty else { return }
+        guard AuthConfig.isConfigured else { return }
+        guard let authManager, authManager.isAuthenticated else { return }
+        guard let profileViewModel,
+              let activeProfile = profileViewModel.activeProfile ?? profileViewModel.profiles.first else { return }
+
+        let remoteProfileId = ProfileSyncIndexStore.remoteId(
+            for: activeProfile,
+            in: profileViewModel.profiles
+        )
+        let knownRows = lastPulledAddonRows
+
+        Task { @MainActor [weak self] in
+            guard let self, let session = await authManager.validSessionForSync() else { return }
+            var payload: [[String: Any]] = []
+            for (index, url) in urls.enumerated() {
+                let known = knownRows.first { $0.url == url }
+                var row: [String: Any] = [
+                    "url": url,
+                    "sort_order": index,
+                    "enabled": known?.enabled ?? true
+                ]
+                if let name = known?.name, !name.isEmpty { row["name"] = name }
+                payload.append(row)
+            }
+            for known in knownRows where !urls.contains(known.url) {
+                var row: [String: Any] = [
+                    "url": known.url,
+                    "sort_order": payload.count,
+                    "enabled": known.enabled
+                ]
+                if let name = known.name, !name.isEmpty { row["name"] = name }
+                payload.append(row)
+            }
+
+            do {
+                try await self.client.pushAddons(
+                    session: session,
+                    remoteProfileId: remoteProfileId,
+                    rows: payload
+                )
+                print("Nuvio sync pushed \(payload.count) add-on(s) after reorder.")
+            } catch {
+                print("Nuvio add-on order push failed: \(error.localizedDescription)")
+            }
+        }
+    }
+
     private func currentSyncKey() -> String? {
         guard let authManager, let profileViewModel else { return nil }
         guard case let .fullAccount(userId, _) = authManager.authState else { return nil }
@@ -312,6 +523,13 @@ final class NuvioSyncManager: ObservableObject {
             in: profileViewModel.profiles
         )
         return "\(userId):\(remoteProfileId)"
+    }
+
+    /// The locally seeded default profiles ("Nuvio Guest" / "Nuvio User")
+    /// that exist before any sync or user edit. Never worth pushing.
+    private static func isPlaceholderProfile(_ profile: Profile) -> Bool {
+        let name = profile.name.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return name == "nuvio guest" || name == "nuvio user"
     }
 
     private static func watchStateSyncEnabled(for profileId: String) -> Bool {
@@ -423,6 +641,23 @@ fileprivate final class SupabaseSyncClient {
         return rows.elements
     }
 
+    /// Pulls the account's collections blob (`sync_pull_collections`, same
+    /// contract as the Android app). Returns the raw `collections_json` array
+    /// re-encoded as Data, or nil when the account has none.
+    func pullCollections(session: AuthSession, remoteProfileId: Int) async throws -> Data? {
+        let data = try await rpcData(
+            "sync_pull_collections",
+            session: session,
+            params: ["p_profile_id": remoteProfileId]
+        )
+        guard let rows = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+              let blob = rows.first?["collections_json"],
+              !(blob is NSNull) else {
+            return nil
+        }
+        return try JSONSerialization.data(withJSONObject: blob)
+    }
+
     func applyAddons(_ addons: [RemoteAddon], localProfileId: String) -> Int {
         let urls = addons
             .filter(\.enabled)
@@ -435,6 +670,31 @@ fileprivate final class SupabaseSyncClient {
         defaults.set(urls.first, forKey: SettingsKey.streamAddonManifestURL)
         defaults.set(urls.joined(separator: "\n"), forKey: SettingsKey.streamAddonManifestURLs)
         return urls.count
+    }
+
+    /// Replaces the profile's collections blob (`sync_push_collections`).
+    func pushCollections(session: AuthSession, remoteProfileId: Int, rawCollections: [[String: Any]]) async throws {
+        try await rpcVoid(
+            "sync_push_collections",
+            session: session,
+            params: [
+                "p_profile_id": remoteProfileId,
+                "p_collections_json": rawCollections
+            ]
+        )
+    }
+
+    /// Replaces the profile's addon set (same contract as Android's
+    /// `sync_push_addons`): rows carry url, sort_order, enabled, name?.
+    func pushAddons(session: AuthSession, remoteProfileId: Int, rows: [[String: Any]]) async throws {
+        try await rpcVoid(
+            "sync_push_addons",
+            session: session,
+            params: [
+                "p_addons": rows,
+                "p_profile_id": remoteProfileId
+            ]
+        )
     }
 
     func pushProfiles(session: AuthSession, profiles: [Profile]) async throws {

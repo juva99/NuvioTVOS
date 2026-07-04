@@ -80,11 +80,22 @@ struct PlayerView: View {
             // focusability is gated inside PlayerControls so focus still hands off
             // cleanly to the remote-input overlay when hidden.
             PlayerControls(viewModel: viewModel)
-                .opacity(viewModel.showControls ? 1 : 0)
+                .opacity(viewModel.showControls && !viewModel.showSettingsPanel ? 1 : 0)
                 .scaleEffect(viewModel.showControls ? 1 : 0.95)
-                .allowsHitTesting(viewModel.showControls)
+                .allowsHitTesting(viewModel.showControls && !viewModel.showSettingsPanel)
                 .animation(.playerControls, value: viewModel.showControls)
+                .animation(.playerControls, value: viewModel.showSettingsPanel)
+
+            // Settings panel (subtitles / audio / speed), over the dimmed video.
+            if viewModel.showSettingsPanel {
+                PlayerSettingsPanel(viewModel: viewModel) {
+                    viewModel.showSettingsPanel = false
+                }
+                .transition(.opacity)
+                .zIndex(2)
+            }
         }
+        .animation(.playerControls, value: viewModel.showSettingsPanel)
         .onAppear {
             viewModel.load(url: url, meta: meta, subtitle: subtitle, externalSubtitles: externalSubtitles, resumeFrom: resumeFrom)
         }
@@ -122,6 +133,12 @@ struct PlayerView: View {
             }
         }
         .onExitCommand {
+            // The panel handles its own exit; this fallback covers the frame
+            // where focus hasn't landed inside it yet.
+            if viewModel.showSettingsPanel {
+                viewModel.showSettingsPanel = false
+                return
+            }
             remoteInputFocused = false
             onBack()
         }

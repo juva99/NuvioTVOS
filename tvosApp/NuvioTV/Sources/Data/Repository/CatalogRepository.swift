@@ -44,6 +44,21 @@ protocol CatalogRepository {
 
     /// Get available genres for content type
     func getGenres(contentType: String) async throws -> [String]
+
+    /// Resolve a synced collection folder's add-on catalog sources into items.
+    /// Unresolvable sources (unknown add-on ids, TMDB/Trakt) are skipped.
+    func getCollectionFolderItems(sources: [NuvioCollectionCatalogSource], limit: Int) async -> [NuvioMeta]
+}
+
+/// One selectable add-on catalog, offered by the Collections editor when
+/// choosing what a folder shows.
+struct AddonCatalogOption: Identifiable {
+    let addonId: String
+    let addonName: String
+    let type: String
+    let catalogId: String
+    let catalogName: String
+    var id: String { "\(addonId)_\(type)_\(catalogId)" }
 }
 
 /// Live Cinemeta-backed implementation used by the tvOS home prototype.
@@ -95,6 +110,61 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     catalogId: spec.catalogId
                 )
             )
+        }
+        catalogs.append(contentsOf: await addonHomeCatalogs())
+        return catalogs
+    }
+
+    /// Home rows from the configured add-ons' manifest catalogs, mirroring the
+    /// Android app: user-configured add-ons (MDBList, AIOStreams, …) expose
+    /// custom catalogs — Marvel, actors, lists — that belong on Home. Search-
+    /// only catalogs and ones needing unsupported extras are skipped; a
+    /// required genre is satisfied with the catalog's first declared option.
+    private func addonHomeCatalogs() async -> [NuvioCatalog] {
+        let showAddonNames = ProfileSettings.current.object(forKey: SettingsKey.catalogAddonNames) as? Bool ?? true
+        let maxRows = 24
+        var catalogs: [NuvioCatalog] = []
+
+        for manifestURL in Self.configuredStreamAddonManifestURLs {
+            guard catalogs.count < maxRows else { break }
+            guard let manifest = await manifest(for: manifestURL),
+                  manifest.id != Self.cinemetaAddonId else { continue }
+
+            let base = manifestURL.deletingLastPathComponent()
+            for catalog in manifest.catalogs ?? [] where catalog.eligibleForHome {
+                guard catalogs.count < maxRows else { break }
+                let genre = catalog.requiresGenre ? catalog.firstGenreOption : nil
+                if catalog.requiresGenre && genre == nil { continue }
+
+                do {
+                    var path = "catalog/\(catalog.type)/\(catalog.id)"
+                    if let genreExtra = genre.flatMap({ encodedExtra(name: "genre", value: $0) }) {
+                        path += "/" + genreExtra
+                    }
+                    path += ".json"
+                    let response: CinemetaCatalogResponse = try await fetch(base.appendingPathComponent(path))
+                    let items = response.metas.map { $0.toMeta(fallbackType: catalog.type) }
+                    guard !items.isEmpty else { continue }
+                    items.forEach { cachedMetaById[$0.id] = $0 }
+
+                    let catalogName = catalog.name ?? catalog.id
+                    let addonName = (manifest.name ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    let title = showAddonNames && !addonName.isEmpty && addonName.caseInsensitiveCompare(catalogName) != .orderedSame
+                        ? "\(addonName) • \(catalogName)"
+                        : catalogName
+                    catalogs.append(
+                        NuvioCatalog(
+                            id: "addon_\(manifest.id)_\(catalog.type)_\(catalog.id)",
+                            name: title,
+                            description: catalogName,
+                            itemIds: items.map(\.id)
+                        )
+                    )
+                } catch {
+                    // A dead catalog endpoint must not block the other rows.
+                    continue
+                }
+            }
         }
         return catalogs
     }
@@ -249,7 +319,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         for addon in subtitleAddons {
             do {
                 let response: StremioSubtitleResponse = try await fetch(addon.subtitleURL(type: subtitleType, id: id))
-                subtitles += response.subtitles.compactMap { $0.toNuvioSubtitle() }
+                subtitles += response.subtitles.compactMap { $0.toNuvioSubtitle(source: addon.name) }
             } catch {
                 print("Failed to load subtitles from \(addon.name): \(error.localizedDescription)")
             }
@@ -330,6 +400,89 @@ final class CinemetaCatalogRepository: CatalogRepository {
         genres
     }
 
+    /// Every selectable add-on catalog (Cinemeta's plus the configured
+    /// add-ons'), for the Collections editor's source picker.
+    func availableAddonCatalogs() async -> [AddonCatalogOption] {
+        var options: [AddonCatalogOption] = []
+        var manifestURLs = [baseURL.appendingPathComponent("manifest.json")]
+        manifestURLs.append(contentsOf: Self.configuredStreamAddonManifestURLs)
+        var seenAddonIds = Set<String>()
+
+        for manifestURL in manifestURLs {
+            guard let manifest = await manifest(for: manifestURL) else { continue }
+            guard seenAddonIds.insert(manifest.id).inserted else { continue }
+            let addonName = (manifest.name ?? "").isEmpty ? (manifestURL.host ?? manifest.id) : manifest.name!
+            for catalog in manifest.catalogs ?? [] where catalog.eligibleForHome {
+                options.append(
+                    AddonCatalogOption(
+                        addonId: manifest.id,
+                        addonName: addonName,
+                        type: catalog.type,
+                        catalogId: catalog.id,
+                        catalogName: catalog.name ?? catalog.id
+                    )
+                )
+            }
+        }
+        return options
+    }
+
+    // MARK: - Synced collection folders
+
+    /// Cinemeta's manifest id as it appears in the Android app's collection
+    /// sources; resolves to the built-in `baseURL` without a manifest fetch.
+    private static let cinemetaAddonId = "com.linvo.cinemeta"
+
+    /// Manifest cache for the configured stream add-ons, shared by the home
+    /// catalog rows and the collection-folder resolver.
+    private var manifestByURL: [URL: AddonManifest] = [:]
+
+    private func manifest(for url: URL) async -> AddonManifest? {
+        if let cached = manifestByURL[url] { return cached }
+        guard let manifest: AddonManifest = try? await fetch(url) else { return nil }
+        manifestByURL[url] = manifest
+        return manifest
+    }
+
+    func getCollectionFolderItems(sources: [NuvioCollectionCatalogSource], limit: Int) async -> [NuvioMeta] {
+        var items: [NuvioMeta] = []
+        var seen = Set<String>()
+
+        for source in sources {
+            guard items.count < limit else { break }
+            guard let base = await baseURL(forAddonId: source.addonId) else { continue }
+            do {
+                var path = "catalog/\(source.type)/\(source.catalogId)"
+                if let genreExtra = source.genre.flatMap({ encodedExtra(name: "genre", value: $0) }) {
+                    path += "/" + genreExtra
+                }
+                path += ".json"
+                let response: CinemetaCatalogResponse = try await fetch(base.appendingPathComponent(path))
+                for meta in response.metas.map({ $0.toMeta(fallbackType: source.type) }) {
+                    guard items.count < limit else { break }
+                    guard seen.insert(meta.id).inserted else { continue }
+                    cachedMetaById[meta.id] = meta
+                    items.append(meta)
+                }
+            } catch {
+                // One dead source must not empty the whole folder row.
+                continue
+            }
+        }
+        return items
+    }
+
+    private func baseURL(forAddonId addonId: String) async -> URL? {
+        if addonId == Self.cinemetaAddonId { return baseURL }
+
+        for manifestURL in Self.configuredStreamAddonManifestURLs {
+            if let manifest = await manifest(for: manifestURL), manifest.id == addonId {
+                return manifestURL.deletingLastPathComponent()
+            }
+        }
+        return nil
+    }
+
     private func fetchCatalog(
         type: String,
         catalogId: String,
@@ -371,6 +524,52 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
 private struct CinemetaCatalogResponse: Decodable {
     let metas: [CinemetaMeta]
+}
+
+/// The slice of a Stremio manifest the home screen needs: identity plus the
+/// catalog list (user-configured add-ons like MDBList expose their custom
+/// catalogs — Marvel, actors, lists — here).
+private struct AddonManifest: Decodable {
+    let id: String
+    let name: String?
+    let catalogs: [AddonManifestCatalog]?
+}
+
+private struct AddonManifestCatalog: Decodable {
+    let type: String
+    let id: String
+    let name: String?
+    let extra: [AddonManifestCatalogExtra]?
+    /// Legacy manifest field predating the structured `extra` array.
+    let extraRequired: [String]?
+
+    /// Mirrors the Android app's `shouldShowOnHome()`: search-only catalogs
+    /// belong to the Search tab, and a catalog whose required extras we can't
+    /// supply (anything beyond `genre`) can't be fetched for Home either.
+    var eligibleForHome: Bool {
+        let required = requiredExtraNames
+        if required.contains("search") { return false }
+        return required.allSatisfy { $0 == "genre" }
+    }
+
+    var requiresGenre: Bool { requiredExtraNames.contains("genre") }
+
+    /// First declared genre option, used to satisfy a required-genre catalog.
+    var firstGenreOption: String? {
+        extra?.first { $0.name.lowercased() == "genre" }?.options?.first
+    }
+
+    private var requiredExtraNames: [String] {
+        let structured = (extra ?? []).filter { $0.isRequired == true }.map { $0.name.lowercased() }
+        let legacy = (extraRequired ?? []).map { $0.lowercased() }
+        return structured + legacy
+    }
+}
+
+private struct AddonManifestCatalogExtra: Decodable {
+    let name: String
+    let isRequired: Bool?
+    let options: [String]?
 }
 
 private struct CinemetaMetaResponse: Decodable {
@@ -448,7 +647,7 @@ private struct StremioStream: Decodable {
             name: displayName,
             description: detailLines.joined(separator: "\n"),
             addonName: addonName,
-            subtitles: subtitles?.compactMap { $0.toNuvioSubtitle() } ?? []
+            subtitles: subtitles?.compactMap { $0.toNuvioSubtitle(source: addonName) } ?? []
         )
     }
 
@@ -474,13 +673,14 @@ private struct StremioStreamSubtitle: Decodable {
     let name: String?
     let id: String?
 
-    func toNuvioSubtitle() -> NuvioSubtitle? {
+    func toNuvioSubtitle(source: String? = nil) -> NuvioSubtitle? {
         guard let subtitleURL = cleaned(url) else { return nil }
         let subtitleLanguage = cleaned(language) ?? cleaned(lang) ?? "Unknown"
         return NuvioSubtitle(
             url: subtitleURL,
             language: subtitleLanguage,
-            label: cleaned(title) ?? cleaned(name) ?? cleaned(id)
+            label: cleaned(title) ?? cleaned(name) ?? cleaned(id),
+            source: source
         )
     }
 
@@ -648,6 +848,10 @@ private struct FlexibleString: Decodable {
 
 /// Mock implementation for testing without Rust SDK
 class MockCatalogRepository: CatalogRepository {
+    func getCollectionFolderItems(sources: [NuvioCollectionCatalogSource], limit: Int) async -> [NuvioMeta] {
+        []
+    }
+
 
     // Mock data
     private let mockGenres = [

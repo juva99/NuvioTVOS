@@ -118,7 +118,7 @@ struct DetailsScreen: View {
                         onSelect: { stream in
                             if let url = stream.url {
                                 isStreamPickerPresented = false
-                                onPlayClick(url, meta, pendingEpisodeSubtitle, smartExternalSubtitles(for: stream))
+                                onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles)
                             }
                         },
                         onDismiss: {
@@ -199,16 +199,11 @@ struct DetailsScreen: View {
         ), let url = stream.url {
             isSmartPlaybackPending = false
             isStreamPickerPresented = false
-            onPlayClick(url, meta, pendingEpisodeSubtitle, smartExternalSubtitles(for: stream))
+            onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles)
         } else {
             isSmartPlaybackPending = false
             isStreamPickerPresented = true
         }
-    }
-
-    private func smartExternalSubtitles(for stream: NuvioStream) -> [NuvioSubtitle] {
-        guard smartSubtitleMatching else { return [] }
-        return SmartPlaybackSelector.matchingSubtitles(in: stream, languages: subtitleLanguagePreferences)
     }
 
     private var subtitleLanguagePreferences: [String] {
@@ -1406,13 +1401,8 @@ private struct TvDetailsSummary: View {
         return nil
     }
 
-    /// Series status badge ("ENDED" / "CONTINUING"); nil for movies.
-    private var statusLabel: String? {
-        guard meta.isSeries,
-              let status = meta.status?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !status.isEmpty else { return nil }
-        return status.caseInsensitiveCompare("Continuing") == .orderedSame ? "ONGOING" : status.uppercased()
-    }
+    /// Series status badge ("ENDED" / "ONGOING"); nil for movies.
+    private var statusLabel: String? { meta.statusBadgeLabel }
 
     private var primaryMetaItems: [String] {
         var items = Array((meta.genres ?? []).prefix(3))

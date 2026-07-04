@@ -1071,6 +1071,18 @@ struct TVHomeView: View {
         .onReceive(NotificationCenter.default.publisher(for: ContinueWatchingStore.changedNotification)) { _ in
             refreshContinueWatching()
         }
+        // Collection rows arrive from the account sync, which usually lands
+        // after Home has loaded — splice them in when the store updates.
+        .onReceive(NotificationCenter.default.publisher(for: CollectionsStore.changedNotification)) { _ in
+            Task { await refreshCollectionSections() }
+        }
+        // Settings → Home Catalogs reorder applies to the mounted Home live.
+        .onReceive(NotificationCenter.default.publisher(for: TVHomeCatalogOrder.changedNotification)) { _ in
+            let reordered = TVHomeCatalogOrder.apply(to: store.sections)
+            if reordered.map(\.id) != store.sections.map(\.id) {
+                store.sections = reordered
+            }
+        }
         .onDisappear {
             focusSettleTask?.cancel()
             landscapeFocusTask?.cancel()
@@ -1267,12 +1279,17 @@ struct TVHomeView: View {
                 )
             }
 
-            store.sections = loadedSections
-            store.hero = loadedSections.first?.items.first
+            let collectionSections = await loadCollectionSections()
+            let pinned = collectionSections.filter(\.isPinnedCollection)
+            let unpinned = collectionSections.filter { !$0.isPinnedCollection }
+            let composed = TVHomeCatalogOrder.apply(to: pinned + loadedSections + unpinned)
+            TVHomeCatalogOrder.writeSnapshot(composed)
+            store.sections = composed
+            store.hero = store.sections.first?.items.first
             store.lastFocusedCardID = nil
             store.hasLoaded = true
             refreshContinueWatching()
-            focusedMeta = loadedSections.first?.items.first
+            focusedMeta = store.sections.first?.items.first
             focusedSectionId = nil
             pendingFocusedMeta = focusedMeta
             landscapeFocusedId = nil
@@ -1283,6 +1300,51 @@ struct TVHomeView: View {
         } catch {
             errorMessage = error.localizedDescription
             isLoading = false
+        }
+    }
+
+    /// Builds one Home row per synced collection folder, resolving each
+    /// folder's add-on catalog sources into items. Folders whose sources are
+    /// all unresolvable (TMDB/Trakt-only, unknown add-ons) are skipped.
+    private func loadCollectionSections() async -> [TVHomeSection] {
+        var sections: [TVHomeSection] = []
+        for collection in CollectionsStore.collections() {
+            for folder in collection.folders {
+                let sources = folder.addonCatalogSources
+                guard !sources.isEmpty else { continue }
+                let items = await repository.getCollectionFolderItems(sources: sources, limit: 18)
+                guard !items.isEmpty else { continue }
+                let title = collection.title.caseInsensitiveCompare(folder.title) == .orderedSame
+                    ? collection.title
+                    : "\(collection.title) • \(folder.title)"
+                sections.append(
+                    TVHomeSection(
+                        id: "\(TVHomeSection.collectionIdPrefix)\(collection.id)_\(folder.id)",
+                        title: title,
+                        items: items,
+                        isPinnedCollection: collection.pinToTop
+                    )
+                )
+            }
+        }
+        return sections
+    }
+
+    /// Re-resolves collection rows in place after a sync pull lands while
+    /// Home is already loaded, without disturbing the catalog rows or focus.
+    private func refreshCollectionSections() async {
+        guard store.hasLoaded else { return }
+        let fresh = await loadCollectionSections()
+        let catalogRows = store.sections.filter { !$0.isCollectionRow }
+        let pinned = fresh.filter(\.isPinnedCollection)
+        let unpinned = fresh.filter { !$0.isPinnedCollection }
+        let merged = TVHomeCatalogOrder.apply(to: pinned + catalogRows + unpinned)
+        TVHomeCatalogOrder.writeSnapshot(merged)
+        // Only publish when the row set actually changed; rebuilding the
+        // section list disturbs tvOS focus.
+        let currentIds = store.sections.map(\.id)
+        if merged.map(\.id) != currentIds {
+            store.sections = merged
         }
     }
 
@@ -1390,6 +1452,8 @@ struct TVHomeView: View {
 
 struct TVHomeSection: Identifiable {
     static let continueWatchingId = "continue_watching"
+    /// Id prefix for rows built from account-synced collection folders.
+    static let collectionIdPrefix = "collection_"
 
     let id: String
     let title: String
@@ -1399,6 +1463,73 @@ struct TVHomeSection: Identifiable {
     var nextSkip: Int? = nil
     var hasMore: Bool = false
     var isLoadingMore: Bool = false
+    /// Pinned collections render above the standard catalog rows.
+    var isPinnedCollection: Bool = false
+
+    var isCollectionRow: Bool { id.hasPrefix(Self.collectionIdPrefix) }
+}
+
+/// User-controlled ordering of Home rows (Settings → Layout → Home Catalogs).
+/// The saved order lives in the active profile's settings; Home records a
+/// titles snapshot on every load so the Settings list can render row names
+/// without refetching catalogs.
+enum TVHomeCatalogOrder {
+    static let changedNotification = Notification.Name("nuvio.tv.homeCatalogOrder.changed")
+
+    static func savedOrder() -> [String] {
+        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogOrder),
+              let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return keys
+    }
+
+    static func save(_ keys: [String]) {
+        guard let data = try? JSONEncoder().encode(keys) else { return }
+        ProfileSettings.current.set(data, forKey: SettingsKey.homeCatalogOrder)
+        NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    /// Saved order first (rows the user has placed), then any new rows in
+    /// their natural position order — mirrors Android's orderedKeys behavior.
+    static func apply(to sections: [TVHomeSection]) -> [TVHomeSection] {
+        let order = savedOrder()
+        guard !order.isEmpty else { return sections }
+        var indexByKey: [String: Int] = [:]
+        for (index, key) in order.enumerated() where indexByKey[key] == nil {
+            indexByKey[key] = index
+        }
+        let known = sections
+            .filter { indexByKey[$0.id] != nil }
+            .sorted { (indexByKey[$0.id] ?? 0) < (indexByKey[$1.id] ?? 0) }
+        let unknown = sections.filter { indexByKey[$0.id] == nil }
+        return known + unknown
+    }
+
+    /// Records the effective rows (id + title, in order) after a Home load.
+    static func writeSnapshot(_ sections: [TVHomeSection]) {
+        let rows = sections.map { ["id": $0.id, "title": $0.title] }
+        guard let data = try? JSONSerialization.data(withJSONObject: rows) else { return }
+        ProfileSettings.current.set(data, forKey: SettingsKey.homeCatalogTitles)
+    }
+
+    /// Keeps the Settings list's snapshot aligned after an in-list move so
+    /// re-entering the pane shows the new order even before Home reloads.
+    static func writeSnapshotRows(_ rows: [(id: String, title: String)]) {
+        let payload = rows.map { ["id": $0.id, "title": $0.title] }
+        guard let data = try? JSONSerialization.data(withJSONObject: payload) else { return }
+        ProfileSettings.current.set(data, forKey: SettingsKey.homeCatalogTitles)
+    }
+
+    /// Rows for the Settings reorder list, from the last Home snapshot.
+    static func snapshotRows() -> [(id: String, title: String)] {
+        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogTitles),
+              let rows = (try? JSONSerialization.jsonObject(with: data)) as? [[String: String]] else {
+            return []
+        }
+        return rows.compactMap { row in
+            guard let id = row["id"], let title = row["title"] else { return nil }
+            return (id: id, title: title)
+        }
+    }
 }
 
 /// Holds the Home screen's browsing state outside `TVHomeView` so it survives
@@ -1688,14 +1819,42 @@ private struct TVHeroMetaLine: View {
             episodeLine ?? meta.type.capitalized,
             meta.genres?.first,
             episodeLine == nil ? formattedRuntime : nil,
-            episodeLine == nil ? releaseDate : (meta.releaseInfo ?? meta.year.map(String.init)),
-            meta.rating.map { String(format: "%.1f IMDb", $0) }
+            episodeLine == nil ? releaseDate : (meta.releaseInfo ?? meta.year.map(String.init))
         ].compactMap { $0 }.filter { !$0.isEmpty }
 
-        Text(values.joined(separator: "  •  "))
-            .font(.custom("Inter-SemiBold", size: 22))
-            .foregroundColor(.white.opacity(0.66))
-            .lineLimit(1)
+        let badge = meta.statusBadgeLabel
+        let rating = meta.rating.map { String(format: "IMDb %.1f", $0) }
+
+        VStack(alignment: .leading, spacing: 10) {
+            Text(values.joined(separator: "  •  "))
+                .font(.custom("Inter-SemiBold", size: 22))
+                .foregroundColor(.white.opacity(0.66))
+                .lineLimit(1)
+
+            // Second line, like the Android hero: "[ONGOING] • IMDb 7.4".
+            if badge != nil || rating != nil {
+                HStack(spacing: 14) {
+                    if let badge {
+                        Text(badge)
+                            .font(.custom("Inter-SemiBold", size: 17))
+                            .foregroundColor(.white.opacity(0.88))
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 4)
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                                    .stroke(Color.white.opacity(0.45), lineWidth: 1.5)
+                            )
+                    }
+
+                    if let rating {
+                        Text(badge != nil ? "•  \(rating)" : rating)
+                            .font(.custom("Inter-SemiBold", size: 22))
+                            .foregroundColor(.white.opacity(0.66))
+                            .lineLimit(1)
+                    }
+                }
+            }
+        }
     }
 
     private var formattedRuntime: String? {
