@@ -60,6 +60,11 @@ class PlayerViewModel: ObservableObject {
     private var didApplyResume = false
     private var pendingExternalSubtitles: [NuvioSubtitle] = []
     private var didAddExternalSubtitles = false
+    private var activeTrackSelectionKey: String?
+    private var pendingTrackSelection: PlayerTrackSelection?
+    private var didApplySavedAudioSelection = false
+    private var didApplySavedSubtitleSelection = false
+    private var didApplyAudioPreference = false
     private var didApplySubtitlePreference = false
     private var lastProgressSave = Date.distantPast
     private var controlsAutoHideSuspended = false
@@ -98,6 +103,12 @@ class PlayerViewModel: ObservableObject {
             ? nil
             : Self.episodeNumbers(fromSubtitle: subtitle)
                 ?? Self.episodeNumbers(fromStreamURL: url.absoluteString, isSeries: meta.isSeries)
+        let selectionKey = isTrailerPlayback
+            ? nil
+            : PlayerTrackSelectionStore.key(meta: meta, episode: self.activeEpisodeNumbers)
+        let savedSelection = selectionKey.flatMap { PlayerTrackSelectionStore.selection(for: $0) }
+        self.activeTrackSelectionKey = selectionKey
+        self.pendingTrackSelection = savedSelection
         self.pendingResumeSeconds = isTrailerPlayback ? nil : resumeFrom
         self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
         self.didDetectReplacementStream = false
@@ -105,12 +116,21 @@ class PlayerViewModel: ObservableObject {
         // The full list stays browsable in the subtitle panel; only smart-matched
         // ones are eagerly loaded into mpv (loading all would fetch dozens of files).
         self.availableExternalSubtitles = isTrailerPlayback ? [] : externalSubtitles
-        let smartMatched = isTrailerPlayback ? [] : Self.smartMatchedSubtitles(in: externalSubtitles)
-        self.pendingExternalSubtitles = smartMatched
-        self.didAddExternalSubtitles = smartMatched.isEmpty
+        let smartMatched = isTrailerPlayback || savedSelection?.subtitle != nil
+            ? []
+            : Self.smartMatchedSubtitles(in: externalSubtitles)
+        self.pendingExternalSubtitles = Self.subtitlesToPreload(
+            smartMatched: smartMatched,
+            savedSelection: savedSelection,
+            availableExternalSubtitles: externalSubtitles
+        )
+        self.didAddExternalSubtitles = pendingExternalSubtitles.isEmpty
         self.subtitleDelayMs = 0
         self.audioDelayMs = 0
         self.audioAmplificationDb = 0
+        self.didApplySavedAudioSelection = savedSelection?.audio == nil
+        self.didApplySavedSubtitleSelection = savedSelection?.subtitle == nil
+        self.didApplyAudioPreference = false
         self.didApplySubtitlePreference = false
         guard !hasLoaded else { return }
         hasLoaded = true
@@ -241,6 +261,8 @@ class PlayerViewModel: ObservableObject {
         subs.insert(SubtitleTrack(id: "off", name: "Off", language: "",
                                   isSelected: !anySelected), at: 0)
         subtitles = subs
+        applySavedTrackSelectionsIfNeeded()
+        applyAudioPreferenceIfNeeded()
         applySubtitlePreferenceIfNeeded()
     }
 
@@ -329,13 +351,18 @@ class PlayerViewModel: ObservableObject {
 
     // MARK: - Track selection
 
-    func selectSubtitle(_ track: SubtitleTrack) {
+    func selectSubtitle(_ track: SubtitleTrack, persist: Bool = true) {
         if track.id == "off" {
             playerController.selectSubtitle(-1)
         } else if let id = Int(track.id) {
             playerController.selectSubtitle(id)
         }
         subtitles = subtitles.map { var t = $0; t.isSelected = (t.id == track.id); return t }
+        if persist {
+            saveSubtitleSelection(track)
+            didApplySavedSubtitleSelection = true
+            didApplySubtitlePreference = true
+        }
     }
 
     /// Selects an external subtitle from the panel: if mpv already loaded this
@@ -345,8 +372,31 @@ class PlayerViewModel: ObservableObject {
         if let track = subtitles.first(where: { $0.externalFilename == subtitle.url }) {
             selectSubtitle(track)
         } else {
+            saveSubtitleSelection(subtitle)
+            didApplySavedSubtitleSelection = true
+            didApplySubtitlePreference = true
             playerController.addSubtitleUrl(subtitle.url)
         }
+    }
+
+    private static func subtitlesToPreload(
+        smartMatched: [NuvioSubtitle],
+        savedSelection: PlayerTrackSelection?,
+        availableExternalSubtitles: [NuvioSubtitle]
+    ) -> [NuvioSubtitle] {
+        var result = smartMatched
+        guard let saved = savedSelection?.subtitle,
+              saved.kind == .external,
+              let url = saved.externalURL,
+              !url.isEmpty,
+              !result.contains(where: { $0.url == url }) else {
+            return result
+        }
+
+        let savedSubtitle = availableExternalSubtitles.first { $0.url == url }
+            ?? NuvioSubtitle(url: url, language: saved.language ?? "", label: saved.name, source: "Saved")
+        result.append(savedSubtitle)
+        return result
     }
 
     /// The subset of a stream's external subtitles worth auto-loading into mpv:
@@ -374,8 +424,54 @@ class PlayerViewModel: ObservableObject {
         didAddExternalSubtitles = true
     }
 
+    private func applySavedTrackSelectionsIfNeeded() {
+        guard let selection = pendingTrackSelection else { return }
+
+        if !didApplySavedAudioSelection, let audio = selection.audio,
+           let matchingTrack = matchingAudioTrack(for: audio) {
+            didApplySavedAudioSelection = true
+            selectAudio(matchingTrack, persist: false)
+        }
+
+        guard !didApplySavedSubtitleSelection, let subtitle = selection.subtitle else { return }
+        switch subtitle.kind {
+        case .off:
+            if let off = subtitles.first(where: { $0.id == "off" }) {
+                didApplySavedSubtitleSelection = true
+                selectSubtitle(off, persist: false)
+            }
+        case .embedded:
+            if let matchingTrack = matchingEmbeddedSubtitleTrack(for: subtitle) {
+                didApplySavedSubtitleSelection = true
+                selectSubtitle(matchingTrack, persist: false)
+            }
+        case .external:
+            guard let url = subtitle.externalURL, !url.isEmpty else {
+                didApplySavedSubtitleSelection = true
+                return
+            }
+            if let matchingTrack = subtitles.first(where: { $0.externalFilename == url }) {
+                didApplySavedSubtitleSelection = true
+                selectSubtitle(matchingTrack, persist: false)
+            }
+        }
+    }
+
+    private func applyAudioPreferenceIfNeeded() {
+        guard !didApplyAudioPreference, pendingTrackSelection?.audio == nil else { return }
+        let preferred = ProfileSettings.current.string(forKey: SettingsKey.audioLanguage) ?? "System"
+        guard !SubtitleLanguagePreferences.disabledValues.contains(preferred) else {
+            didApplyAudioPreference = true
+            return
+        }
+        guard let matchingTrack = audioTracks.first(where: { audioTrack($0, matches: preferred) }) else { return }
+        didApplyAudioPreference = true
+        selectAudio(matchingTrack, persist: false)
+    }
+
     private func applySubtitlePreferenceIfNeeded() {
         guard !didApplySubtitlePreference else { return }
+        guard pendingTrackSelection?.subtitle == nil else { return }
         guard ProfileSettings.current.bool(forKey: SettingsKey.smartSubtitleMatching) else { return }
 
         let preferredLanguages = SubtitleLanguagePreferences.orderedFromDefaults()
@@ -396,14 +492,119 @@ class PlayerViewModel: ObservableObject {
         guard let matchingTrack else { return }
 
         didApplySubtitlePreference = true
-        selectSubtitle(matchingTrack)
+        selectSubtitle(matchingTrack, persist: false)
     }
 
-    func selectAudio(_ track: AudioTrack) {
+    func selectAudio(_ track: AudioTrack, persist: Bool = true) {
         if let id = Int(track.id) {
             playerController.selectAudio(id)
         }
         audioTracks = audioTracks.map { var t = $0; t.isSelected = (t.id == track.id); return t }
+        if persist {
+            saveAudioSelection(track)
+            didApplySavedAudioSelection = true
+            didApplyAudioPreference = true
+        }
+    }
+
+    private func saveAudioSelection(_ track: AudioTrack) {
+        guard let activeTrackSelectionKey else { return }
+        PlayerTrackSelectionStore.saveAudio(
+            PlayerTrackSelection.Audio(
+                id: track.id,
+                name: track.name,
+                language: track.language,
+                languageName: track.languageName
+            ),
+            for: activeTrackSelectionKey
+        )
+    }
+
+    private func saveSubtitleSelection(_ track: SubtitleTrack) {
+        guard let activeTrackSelectionKey else { return }
+        let selection: PlayerTrackSelection.Subtitle
+        if track.id == "off" {
+            selection = PlayerTrackSelection.Subtitle(kind: .off)
+        } else if !track.externalFilename.isEmpty {
+            selection = PlayerTrackSelection.Subtitle(
+                kind: .external,
+                id: track.id,
+                name: track.name,
+                language: track.language,
+                externalURL: track.externalFilename
+            )
+        } else {
+            selection = PlayerTrackSelection.Subtitle(
+                kind: .embedded,
+                id: track.id,
+                name: track.name,
+                language: track.language
+            )
+        }
+        PlayerTrackSelectionStore.saveSubtitle(selection, for: activeTrackSelectionKey)
+    }
+
+    private func saveSubtitleSelection(_ subtitle: NuvioSubtitle) {
+        guard let activeTrackSelectionKey else { return }
+        PlayerTrackSelectionStore.saveSubtitle(
+            PlayerTrackSelection.Subtitle(
+                kind: .external,
+                name: subtitle.label,
+                language: subtitle.language,
+                externalURL: subtitle.url
+            ),
+            for: activeTrackSelectionKey
+        )
+    }
+
+    private func matchingAudioTrack(for saved: PlayerTrackSelection.Audio) -> AudioTrack? {
+        if let track = audioTracks.first(where: { $0.id == saved.id }) { return track }
+        if let track = audioTracks.first(where: {
+            Self.sameTrackText($0.name, saved.name) &&
+            Self.sameTrackText($0.language, saved.language)
+        }) { return track }
+        if let track = audioTracks.first(where: {
+            Self.sameTrackText($0.name, saved.name) &&
+            Self.sameTrackText($0.languageName, saved.languageName)
+        }) { return track }
+        if !saved.language.isEmpty,
+           let track = audioTracks.first(where: { Self.sameTrackText($0.language, saved.language) }) {
+            return track
+        }
+        if !saved.languageName.isEmpty,
+           let track = audioTracks.first(where: { Self.sameTrackText($0.languageName, saved.languageName) }) {
+            return track
+        }
+        return nil
+    }
+
+    private func matchingEmbeddedSubtitleTrack(for saved: PlayerTrackSelection.Subtitle) -> SubtitleTrack? {
+        let candidates = subtitles.filter { $0.id != "off" && $0.externalFilename.isEmpty }
+        if let id = saved.id,
+           let track = candidates.first(where: { $0.id == id }) {
+            return track
+        }
+        if let track = candidates.first(where: {
+            Self.sameTrackText($0.name, saved.name) &&
+            Self.sameTrackText($0.language, saved.language)
+        }) { return track }
+        if let language = saved.language, !language.isEmpty,
+           let track = candidates.first(where: { Self.sameTrackText($0.language, language) }) {
+            return track
+        }
+        return nil
+    }
+
+    private func audioTrack(_ track: AudioTrack, matches language: String) -> Bool {
+        SubtitleLanguagePreferences.matches(track.language, target: language) ||
+        SubtitleLanguagePreferences.matches(track.languageName, target: language) ||
+        SubtitleLanguagePreferences.matches(track.name, target: language)
+    }
+
+    private static func sameTrackText(_ lhs: String?, _ rhs: String?) -> Bool {
+        let left = lhs?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        let right = rhs?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        return !left.isEmpty && left == right
     }
 
     // MARK: - Controls visibility
@@ -642,6 +843,91 @@ class PlayerViewModel: ObservableObject {
         value.count == 11 && value.allSatisfy { char in
             char.isLetter || char.isNumber || char == "_" || char == "-"
         }
+    }
+}
+
+// MARK: - Per-episode player track selections
+
+private struct PlayerTrackSelection: Codable {
+    struct Audio: Codable {
+        let id: String
+        let name: String
+        let language: String
+        let languageName: String
+    }
+
+    struct Subtitle: Codable {
+        enum Kind: String, Codable {
+            case off
+            case embedded
+            case external
+        }
+
+        let kind: Kind
+        var id: String?
+        var name: String?
+        var language: String?
+        var externalURL: String?
+    }
+
+    var audio: Audio?
+    var subtitle: Subtitle?
+    var updatedAt: Date = Date()
+}
+
+private enum PlayerTrackSelectionStore {
+    private static let maxItems = 300
+
+    static func key(meta: NuvioMeta, episode: (season: Int, episode: Int)?) -> String {
+        if let episode {
+            return "\(meta.type):\(meta.id):s\(episode.season)e\(episode.episode)"
+        }
+        return "\(meta.type):\(meta.id)"
+    }
+
+    static func selection(for key: String) -> PlayerTrackSelection? {
+        selections()[key]
+    }
+
+    static func saveAudio(_ audio: PlayerTrackSelection.Audio, for key: String) {
+        var all = selections()
+        var selection = all[key] ?? PlayerTrackSelection()
+        selection.audio = audio
+        selection.updatedAt = Date()
+        all[key] = selection
+        persist(all)
+    }
+
+    static func saveSubtitle(_ subtitle: PlayerTrackSelection.Subtitle, for key: String) {
+        var all = selections()
+        var selection = all[key] ?? PlayerTrackSelection()
+        selection.subtitle = subtitle
+        selection.updatedAt = Date()
+        all[key] = selection
+        persist(all)
+    }
+
+    private static func selections() -> [String: PlayerTrackSelection] {
+        guard let json = ProfileSettings.current.string(forKey: SettingsKey.playbackTrackSelections),
+              let data = json.data(using: .utf8),
+              let selections = try? JSONDecoder().decode([String: PlayerTrackSelection].self, from: data) else {
+            return [:]
+        }
+        return selections
+    }
+
+    private static func persist(_ selections: [String: PlayerTrackSelection]) {
+        let trimmed = Dictionary(
+            uniqueKeysWithValues: selections
+                .sorted { $0.value.updatedAt > $1.value.updatedAt }
+                .prefix(maxItems)
+                .map { ($0.key, $0.value) }
+        )
+        guard let data = try? JSONEncoder().encode(trimmed),
+              let json = String(data: data, encoding: .utf8) else {
+            return
+        }
+        ProfileSettings.current.set(json, forKey: SettingsKey.playbackTrackSelections)
     }
 }
 

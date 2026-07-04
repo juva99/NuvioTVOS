@@ -11,7 +11,7 @@ public struct Profile: Equatable, Hashable, Identifiable {
     public var isAdmin: Bool
     public var avatarId: String
 
-    public init(id: String, name: String, isPinProtected: Bool = false, isAdmin: Bool = false, avatarId: String = "default") {
+    public init(id: String, name: String, isPinProtected: Bool = false, isAdmin: Bool = false, avatarId: String = "") {
         self.id = id
         self.name = name
         self.isPinProtected = isPinProtected
@@ -101,7 +101,7 @@ public class ProfileManager {
             name: input.name,
             isPinProtected: input.pin != nil,
             isAdmin: false,
-            avatarId: input.avatarId ?? "default"
+            avatarId: input.avatarId ?? ""
         )
         profiles.append(profile)
         saveProfiles(profiles)
@@ -228,6 +228,7 @@ public class ProfileViewModel: ObservableObject {
     public let profileChosen = PassthroughSubject<Profile, Never>()
 
     private let profileManager: ProfileManager?
+    private var profilesObserver: Any?
 
     public init(profileManager: ProfileManager? = nil) {
         if let manager = profileManager {
@@ -243,20 +244,37 @@ public class ProfileViewModel: ObservableObject {
         }
         loadProfiles()
         loadActiveProfile()
+
+        // Reload when sync (or any other path) writes new profiles so the
+        // Who's-Watching screen updates live after login / first sync.
+        profilesObserver = NotificationCenter.default.addObserver(
+            forName: ProfileManager.profilesChangedNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.loadProfiles()
+            self?.loadActiveProfile()
+        }
+    }
+
+    deinit {
+        if let observer = profilesObserver {
+            NotificationCenter.default.removeObserver(observer)
+        }
     }
 
     public func loadProfiles() {
         guard let manager = profileManager else {
             // Seed a default profile so the UI isn't empty
             if profiles.isEmpty {
-                profiles = [Profile(id: "1", name: "Nuvio User", isPinProtected: false, isAdmin: true, avatarId: "default")]
+                profiles = [Profile(id: "1", name: "Nuvio User", isPinProtected: false, isAdmin: true, avatarId: "")]
             }
             return
         }
         do {
             var list = try manager.getProfiles()
             if list.isEmpty {
-                let input = CreateProfileInput(name: "Nuvio Guest", profileType: .admin, avatarId: "default")
+                let input = CreateProfileInput(name: "Nuvio Guest", profileType: .admin, avatarId: "")
                 _ = try manager.createProfile(input: input)
                 list = try manager.getProfiles()
             }
@@ -292,7 +310,7 @@ public class ProfileViewModel: ObservableObject {
         }
     }
 
-    public func createProfile(name: String, pin: String?, avatarId: String = "default") {
+    public func createProfile(name: String, pin: String?, avatarId: String = "") {
         guard let manager = profileManager else { return }
         isLoading = true
         let input = CreateProfileInput(name: name, profileType: .adult, avatarId: avatarId, pin: pin)
@@ -393,7 +411,7 @@ public class ProfileViewModel: ObservableObject {
             name: "Nuvio Guest",
             isPinProtected: false,
             isAdmin: true,
-            avatarId: "default"
+            avatarId: ""
         )
         // Collect ids before replacing the profile list so their settings
         // suites can be deleted below.

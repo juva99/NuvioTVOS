@@ -1,4 +1,5 @@
 import SwiftUI
+import Foundation
 
 public struct UserProfileView: View {
     @StateObject private var viewModel: ProfileViewModel
@@ -66,6 +67,7 @@ public struct UserProfileView: View {
                     ProfilePinView(viewModel: viewModel)
                 }
             }
+            .onAppear { AvatarCatalogStore.shared.loadIfNeeded() }
             .sheet(isPresented: $showingAddProfile) {
                 AddProfileView(
                     isPresented: $showingAddProfile,
@@ -216,117 +218,176 @@ private struct ProfilePlainButtonStyle: ButtonStyle {
     }
 }
 
-struct ProfileAvatar: Identifiable {
+// MARK: - Synced avatar catalog (mirrors the Android TV avatar system)
+
+/// One avatar from the account's shared catalog (`get_avatar_catalog`). The
+/// `id` is the server row referenced by `profiles.avatar_id`, so storing it
+/// keeps profile pushes within the `fk_profiles_avatar_id` foreign key.
+struct AvatarCatalogItem: Identifiable, Decodable {
     let id: String
-    let name: String
-    let symbolName: String
-    let colors: [Color]
+    let displayName: String
+    let storagePath: String
+    let category: String
+    let sortOrder: Int
+    let bgColor: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id
+        case displayName = "display_name"
+        case storagePath = "storage_path"
+        case category
+        case sortOrder = "sort_order"
+        case bgColor = "bg_color"
+    }
+
+    var imageURL: URL? {
+        let path = storagePath.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        guard !path.isEmpty else { return nil }
+        return URL(string: "\(AuthConfig.normalizedSupabaseURL)/storage/v1/object/public/avatars/\(path)")
+    }
+
+    /// Circle fill shown behind the (transparent-PNG) face while it loads and
+    /// around its edges — the catalog ships a per-avatar accent color.
+    var backgroundColor: Color {
+        guard let bgColor, !bgColor.isEmpty else { return Color(red: 0.12, green: 0.30, blue: 0.55) }
+        return Color(hex: bgColor)
+    }
 }
 
+/// Fetches the shared avatar catalog once and caches it for the session. Loads
+/// with the publishable key (no user session required), so avatars render on
+/// who's-watching even before the account sync runs. Backed by a shared
+/// singleton so every avatar surface resolves the same images.
+@MainActor
+final class AvatarCatalogStore: ObservableObject {
+    static let shared = AvatarCatalogStore()
+
+    @Published private(set) var items: [AvatarCatalogItem] = []
+    private var byId: [String: AvatarCatalogItem] = [:]
+    private var isLoading = false
+    private var hasLoaded = false
+
+    private init() {}
+
+    func loadIfNeeded() {
+        guard !hasLoaded, !isLoading, AuthConfig.isConfigured else { return }
+        isLoading = true
+        Task { await load() }
+    }
+
+    private func load() async {
+        defer { isLoading = false }
+        guard let url = URL(string: "\(AuthConfig.normalizedSupabaseURL)/rest/v1/rpc/get_avatar_catalog") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(AuthConfig.apiKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(AuthConfig.apiKey)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.httpBody = Data("{}".utf8)
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+                print("Avatar catalog load failed: HTTP \((response as? HTTPURLResponse)?.statusCode ?? -1)")
+                return
+            }
+            let decoded = try JSONDecoder().decode([AvatarCatalogItem].self, from: data)
+            let sorted = decoded.sorted { $0.sortOrder < $1.sortOrder }
+            items = sorted
+            byId = Dictionary(sorted.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            hasLoaded = true
+            print("Avatar catalog loaded \(sorted.count) avatar(s).")
+        } catch {
+            print("Avatar catalog load failed: \(error.localizedDescription)")
+        }
+    }
+
+    func item(for id: String?) -> AvatarCatalogItem? {
+        guard let id, !id.isEmpty else { return nil }
+        return byId[id]
+    }
+
+    func imageURL(for id: String?) -> URL? { item(for: id)?.imageURL }
+
+    /// Categories shown as picker tabs: "All" first, then the marquee ones the
+    /// Android app pins, then any remaining categories alphabetically.
+    private static let pinnedCategories = ["anime", "animation", "tv", "movie", "gaming"]
+
+    var categories: [String] {
+        var seen = Set<String>()
+        let ordered = items.map { $0.category.lowercased() }.filter { seen.insert($0).inserted }
+        let pinned = Self.pinnedCategories.filter { ordered.contains($0) }
+        let rest = ordered.filter { !Self.pinnedCategories.contains($0) }.sorted()
+        return ["all"] + pinned + rest
+    }
+
+    func items(in category: String) -> [AvatarCatalogItem] {
+        guard category != "all" else { return items }
+        return items.filter { $0.category.caseInsensitiveCompare(category) == .orderedSame }
+    }
+}
+
+/// Minimal shim kept so the tvOS tab bar (which can only show a system image,
+/// not a remote avatar) and the "no avatar chosen" default keep compiling.
 enum ProfileAvatarCatalog {
-    static let defaultId = "default"
+    /// Empty means "no avatar chosen yet" — the profile renders the brand
+    /// gradient fallback until one is picked from the synced catalog. An empty
+    /// id also pushes as a null `avatar_id`, staying within the FK constraint.
+    static let defaultId = ""
 
-    static let avatars: [ProfileAvatar] = [
-        ProfileAvatar(
-            id: defaultId,
-            name: "Nova",
-            symbolName: "sparkles",
-            colors: [Color(red: 0.98, green: 0.45, blue: 0.78), Color(red: 0.44, green: 0.32, blue: 0.94)]
-        ),
-        ProfileAvatar(
-            id: "orbit",
-            name: "Orbit",
-            symbolName: "moon.stars.fill",
-            colors: [Color(red: 0.18, green: 0.60, blue: 0.93), Color(red: 0.08, green: 0.20, blue: 0.52)]
-        ),
-        ProfileAvatar(
-            id: "arcade",
-            name: "Arcade",
-            symbolName: "gamecontroller.fill",
-            colors: [Color(red: 0.16, green: 0.78, blue: 0.58), Color(red: 0.03, green: 0.36, blue: 0.34)]
-        ),
-        ProfileAvatar(
-            id: "cinema",
-            name: "Cinema",
-            symbolName: "film.fill",
-            colors: [Color(red: 0.94, green: 0.24, blue: 0.20), Color(red: 0.50, green: 0.08, blue: 0.18)]
-        ),
-        ProfileAvatar(
-            id: "bolt",
-            name: "Bolt",
-            symbolName: "bolt.fill",
-            colors: [Color(red: 1.0, green: 0.70, blue: 0.20), Color(red: 0.93, green: 0.31, blue: 0.18)]
-        ),
-        ProfileAvatar(
-            id: "heart",
-            name: "Heart",
-            symbolName: "heart.fill",
-            colors: [Color(red: 1.0, green: 0.42, blue: 0.58), Color(red: 0.65, green: 0.10, blue: 0.30)]
-        ),
-        ProfileAvatar(
-            id: "music",
-            name: "Music",
-            symbolName: "music.note",
-            colors: [Color(red: 0.38, green: 0.72, blue: 1.0), Color(red: 0.20, green: 0.32, blue: 0.78)]
-        ),
-        ProfileAvatar(
-            id: "leaf",
-            name: "Leaf",
-            symbolName: "leaf.fill",
-            colors: [Color(red: 0.39, green: 0.80, blue: 0.42), Color(red: 0.08, green: 0.42, blue: 0.26)]
-        )
-    ]
-
-    static func avatar(for id: String?) -> ProfileAvatar {
-        avatars.first(where: { $0.id == id }) ?? avatars[0]
-    }
-
-    static func symbolName(for id: String?) -> String {
-        avatar(for: id).symbolName
-    }
+    static func symbolName(for id: String?) -> String { "person.crop.circle" }
 }
 
+/// Renders a profile's avatar: the synced catalog image over its accent color,
+/// or the brand gradient when no avatar is set / the catalog hasn't loaded.
 struct ProfileAvatarView: View {
     let avatarId: String
     var size: CGFloat
     var isFocused: Bool = false
 
-    private var avatar: ProfileAvatar {
-        ProfileAvatarCatalog.avatar(for: avatarId)
-    }
+    @ObservedObject private var catalog = AvatarCatalogStore.shared
 
     var body: some View {
         ZStack {
-            Circle()
-                .fill(
+            if let item = catalog.item(for: avatarId) {
+                Circle().fill(item.backgroundColor)
+                AsyncImage(url: item.imageURL) { phase in
+                    if let image = phase.image {
+                        image.resizable().aspectRatio(contentMode: .fill)
+                    } else {
+                        Color.clear
+                    }
+                }
+            } else {
+                Circle().fill(
                     LinearGradient(
-                        colors: avatar.colors,
+                        colors: [Color(red: 0.98, green: 0.45, blue: 0.78),
+                                 Color(red: 0.44, green: 0.32, blue: 0.94)],
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     )
                 )
-
-            Image(systemName: avatar.symbolName)
-                .font(.system(size: size * 0.42, weight: .bold))
-                .foregroundColor(.white)
-                .shadow(color: .black.opacity(0.18), radius: 5, x: 0, y: 3)
+                Image(systemName: "sparkles")
+                    .font(.system(size: size * 0.42, weight: .bold))
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.18), radius: 5, x: 0, y: 3)
+            }
         }
         .frame(width: size, height: size)
+        .clipShape(Circle())
         .overlay(
             Circle()
                 .stroke(Color.white.opacity(isFocused ? 0.86 : 0.28), lineWidth: isFocused ? 3 : 1)
         )
-        .shadow(color: isFocused ? Color.white.opacity(0.3) : .black.opacity(0.24), radius: isFocused ? 24 : 10, x: 0, y: 8)
+        .shadow(color: isFocused ? Color.white.opacity(0.3) : .black.opacity(0.24),
+                radius: isFocused ? 24 : 10, x: 0, y: 8)
+        .onAppear { catalog.loadIfNeeded() }
     }
 }
 
-/// Stable avatar color fallback for older profile surfaces.
+/// Stable accent used by the primary-profile star / label.
 enum ProfileAvatarStyle {
     static let accent = Color(red: 0.98, green: 0.67, blue: 0.12) // primary star / label
-
-    static func color(for id: String) -> Color {
-        ProfileAvatarCatalog.avatar(for: id).colors.first ?? .blue
-    }
 }
 
 struct AddProfileView: View {
@@ -346,7 +407,7 @@ struct AddProfileView: View {
                 }
 
                 Section(header: Text("Avatar")) {
-                    ProfileAvatarPicker(selectedAvatarId: $avatarId)
+                    AvatarPickerGrid(selectedAvatarId: $avatarId)
                 }
 
                 Button("Save") {
@@ -367,49 +428,133 @@ struct AddProfileView: View {
     }
 }
 
-struct ProfileAvatarPicker: View {
+/// Category-tabbed grid of the synced avatar catalog, matching the Android TV
+/// avatar picker. Selecting an item stores its server id in `selectedAvatarId`.
+struct AvatarPickerGrid: View {
     @Binding var selectedAvatarId: String
 
-    private let columns = [
-        GridItem(.fixed(118), spacing: 18),
-        GridItem(.fixed(118), spacing: 18),
-        GridItem(.fixed(118), spacing: 18),
-        GridItem(.fixed(118), spacing: 18)
-    ]
+    @ObservedObject private var catalog = AvatarCatalogStore.shared
+    @State private var selectedCategory = "all"
+
+    private let columns = [GridItem(.adaptive(minimum: 118, maximum: 118), spacing: 18)]
 
     var body: some View {
-        LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
-            ForEach(ProfileAvatarCatalog.avatars) { avatar in
-                Button {
-                    selectedAvatarId = avatar.id
-                } label: {
-                    VStack(spacing: 9) {
-                        ProfileAvatarView(
-                            avatarId: avatar.id,
-                            size: 76,
-                            isFocused: avatar.id == selectedAvatarId
-                        )
-
-                        Text(avatar.name)
-                            .font(.system(size: 18, weight: .semibold))
-                            .foregroundColor(.white.opacity(0.82))
-                            .lineLimit(1)
-                    }
-                    .frame(width: 118, height: 122)
-                    .background(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .fill(avatar.id == selectedAvatarId ? Color.white.opacity(0.14) : Color.white.opacity(0.05))
-                    )
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8, style: .continuous)
-                            .stroke(Color.white.opacity(avatar.id == selectedAvatarId ? 0.5 : 0.12), lineWidth: 1)
-                    )
+        VStack(alignment: .leading, spacing: 16) {
+            if catalog.items.isEmpty {
+                HStack {
+                    Spacer()
+                    ProgressView().tint(.white)
+                    Spacer()
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(avatar.name)
+                .padding(.vertical, 24)
+            } else {
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(catalog.categories, id: \.self) { category in
+                            AvatarCategoryTab(
+                                label: categoryLabel(category),
+                                isSelected: selectedCategory == category
+                            ) {
+                                selectedCategory = category
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 4)
+                    .padding(.vertical, 4)
+                }
+
+                LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
+                    ForEach(catalog.items(in: selectedCategory)) { avatar in
+                        AvatarGridCell(
+                            avatar: avatar,
+                            isSelected: avatar.id == selectedAvatarId
+                        ) {
+                            selectedAvatarId = avatar.id
+                        }
+                    }
+                }
             }
         }
-        .padding(.vertical, 8)
+        .onAppear { catalog.loadIfNeeded() }
+    }
+
+    private func categoryLabel(_ category: String) -> String {
+        category == "all" ? "All" : category.replacingOccurrences(of: "_", with: " ").capitalized
+    }
+}
+
+private struct AvatarCategoryTab: View {
+    let label: String
+    let isSelected: Bool
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Text(label)
+                .font(.system(size: 18, weight: .semibold))
+                .foregroundColor(isSelected || isFocused ? .white : .white.opacity(0.6))
+                .padding(.horizontal, 20)
+                .padding(.vertical, 10)
+                .background(
+                    Capsule().fill(
+                        isFocused ? Color.white.opacity(0.22)
+                            : (isSelected ? Color.white.opacity(0.14) : Color.white.opacity(0.05))
+                    )
+                )
+                .overlay(
+                    Capsule().stroke(
+                        isSelected || isFocused ? Color.white.opacity(0.6) : Color.clear,
+                        lineWidth: 1.5
+                    )
+                )
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
+    }
+}
+
+private struct AvatarGridCell: View {
+    let avatar: AvatarCatalogItem
+    let isSelected: Bool
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 8) {
+                ZStack {
+                    Circle().fill(avatar.backgroundColor)
+                    AsyncImage(url: avatar.imageURL) { phase in
+                        if let image = phase.image {
+                            image.resizable().aspectRatio(contentMode: .fill)
+                        } else {
+                            Color.clear
+                        }
+                    }
+                }
+                .frame(width: 96, height: 96)
+                .clipShape(Circle())
+                .overlay(
+                    Circle().stroke(
+                        isSelected || isFocused ? Color.white : Color.white.opacity(0.12),
+                        lineWidth: isSelected || isFocused ? 3 : 1
+                    )
+                )
+                .scaleEffect(isFocused ? 1.1 : 1)
+                .animation(.easeInOut(duration: 0.15), value: isFocused)
+
+                Text(avatar.displayName)
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundColor(.white.opacity(isFocused ? 1 : 0.7))
+                    .lineLimit(1)
+            }
+            .frame(width: 118)
+        }
+        .buttonStyle(.plain)
+        .focused($isFocused)
     }
 }
 
@@ -422,7 +567,7 @@ struct ProfileAvatarPickerSheet: View {
     init(isPresented: Binding<Bool>, title: String, selectedAvatarId: String, onSave: @escaping (String) -> Void) {
         _isPresented = isPresented
         self.title = title
-        _selectedAvatarId = State(initialValue: selectedAvatarId.isEmpty ? ProfileAvatarCatalog.defaultId : selectedAvatarId)
+        _selectedAvatarId = State(initialValue: selectedAvatarId)
         self.onSave = onSave
     }
 
@@ -430,13 +575,14 @@ struct ProfileAvatarPickerSheet: View {
         NavigationView {
             Form {
                 Section(header: Text(title)) {
-                    ProfileAvatarPicker(selectedAvatarId: $selectedAvatarId)
+                    AvatarPickerGrid(selectedAvatarId: $selectedAvatarId)
                 }
 
                 Button("Save") {
                     onSave(selectedAvatarId)
                     isPresented = false
                 }
+                .disabled(selectedAvatarId.isEmpty)
             }
             .navigationTitle("Choose Avatar")
             .toolbar {

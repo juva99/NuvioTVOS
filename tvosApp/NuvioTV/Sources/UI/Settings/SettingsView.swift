@@ -95,6 +95,7 @@ enum SettingsKey {
     static let subtitleSize = "nuvio.tv.settings.playback.subtitleSize"
     static let frameRateMatching = "nuvio.tv.settings.playback.frameRateMatching"
     static let networkCache = "nuvio.tv.settings.playback.networkCache"
+    static let playbackTrackSelections = "nuvio.tv.settings.playback.trackSelections"
 
     static let fastNavigation = "nuvio.tv.settings.advanced.fastNavigation"
     static let smoothFocus = "nuvio.tv.settings.advanced.smoothFocus"
@@ -111,7 +112,7 @@ enum SettingsKey {
         playerEngine, externalPlayer, smartStreamSelection, smartStreamQuality, smartSubtitleMatching,
         autoPlayNext, trailersEnabled, trailerDelay, audioLanguage,
         subtitleLanguage, subtitleLanguageSecondary, subtitleLanguageTertiary,
-        forcedSubtitles, subtitleSize, frameRateMatching, networkCache,
+        forcedSubtitles, subtitleSize, frameRateMatching, networkCache, playbackTrackSelections,
         fastNavigation, smoothFocus, playbackDiagnostics, focusHighlighter
     ] + SubtitleStyleKey.all
 }

@@ -604,7 +604,7 @@ private enum ProfileSyncIndexStore {
                     name: remote.name.isEmpty ? "Nuvio User" : remote.name,
                     isPinProtected: false,
                     isAdmin: remote.profileIndex == 1,
-                    avatarId: remote.avatarId?.isEmpty == false ? remote.avatarId! : "default"
+                    avatarId: remote.avatarId?.isEmpty == false ? remote.avatarId! : ""
                 )
             }
     }
@@ -705,7 +705,7 @@ fileprivate final class SupabaseSyncClient {
                 "avatar_color_hex": "#1E88E5",
                 "uses_primary_addons": false,
                 "uses_primary_plugins": false,
-                "avatar_id": profile.avatarId,
+                "avatar_id": profile.avatarId.isEmpty ? NSNull() : profile.avatarId,
                 "avatar_url": NSNull()
             ]
         }

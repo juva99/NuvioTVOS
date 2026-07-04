@@ -113,28 +113,37 @@ struct PlayerControls: View {
     private var transportRow: some View {
         HStack {
             glassIconButton(
-                systemName: isShowingPause ? "pause.fill" : "play.fill",
                 size: 70,
                 iconSize: 30,
                 isFocused: focusedControl == .play,
                 isEmphasized: isShowingPause
             ) {
                 viewModel.togglePlayPause()
+            } icon: {
+                ZStack {
+                    Image(systemName: "play.fill")
+                        .opacity(isShowingPause ? 0 : 1)
+                    Image(systemName: "pause.fill")
+                        .opacity(isShowingPause ? 1 : 0)
+                }
             }
             .focused($focusedControl, equals: .play)
+            .id("play_pause_button")
 
             Spacer()
 
             glassIconButton(
-                systemName: "ellipsis",
                 size: 70,
                 iconSize: 30,
                 isFocused: focusedControl == .settings,
                 isEmphasized: false
             ) {
                 viewModel.showSettingsPanel = true
+            } icon: {
+                Image(systemName: "ellipsis")
             }
             .focused($focusedControl, equals: .settings)
+            .id("settings_button")
         }
         .shadow(color: .black.opacity(0.74), radius: 20, x: 0, y: 8)
         // Not focusable while hidden so the focus engine hands off to the
@@ -143,16 +152,16 @@ struct PlayerControls: View {
         .disabled(!viewModel.showControls || viewModel.showSettingsPanel)
     }
 
-    private func glassIconButton(
-        systemName: String,
+    private func glassIconButton<Icon: View>(
         size: CGFloat,
         iconSize: CGFloat,
         isFocused: Bool,
         isEmphasized: Bool,
-        action: @escaping () -> Void
+        action: @escaping () -> Void,
+        @ViewBuilder icon: () -> Icon
     ) -> some View {
         Button(action: action) {
-            Image(systemName: systemName)
+            icon()
                 .font(.system(size: iconSize, weight: .semibold))
                 .foregroundColor(isFocused ? .black : .white)
                 .frame(width: size, height: size)

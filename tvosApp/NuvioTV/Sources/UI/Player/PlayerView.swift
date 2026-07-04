@@ -97,12 +97,15 @@ struct PlayerView: View {
         }
         .animation(.playerControls, value: viewModel.showSettingsPanel)
         .onAppear {
+            UIApplication.shared.isIdleTimerDisabled = true
             viewModel.load(url: url, meta: meta, subtitle: subtitle, externalSubtitles: externalSubtitles, resumeFrom: resumeFrom)
         }
         .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
             viewModel.shutdown()
         }
         .onChange(of: viewModel.status) { status in
+            UIApplication.shared.isIdleTimerDisabled = (status == .playing || status == .buffering)
             guard status == .ended,
                   !didHandleFinished,
                   let onFinished else {
