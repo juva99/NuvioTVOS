@@ -21,7 +21,21 @@
 </div>
 
 
-The Apple TV build is published as a `.ipa` on the [Releases page](https://github.com/bobsupra/NuvioTVOS/releases). Sideload it onto an Apple TV with your preferred tool (for example a Mac with Xcode, Apple Configurator, or a sideloading utility). This is a beta build — see the release notes for what works and what still needs testing.
+The Apple TV build is published as a `.ipa` on the [Releases page](https://github.com/bobsupra/NuvioTVOS/releases). Sideload it onto an Apple TV with your preferred tool (for example a Mac with Xcode, Apple Configurator, or a sideloading utility). This is a beta build - see the release notes for what works and what still needs testing.
+
+## Latest tvOS Beta
+
+[Beta 2.2](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.2) is the current tvOS release. Download the unsigned IPA here:
+
+[NuvioTV-tvOS-beta-2.2.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.2/NuvioTV-tvOS-beta-2.2.ipa)
+
+Beta 2.2 focuses on player and profile polish:
+
+- Audio language and subtitle choices are remembered per movie/episode and restored when playback opens again.
+- The player disables the Apple TV idle timer while video is playing or buffering, preventing screensaver interruptions during playback.
+- Play/Pause focus is steadier when toggling playback from the Siri Remote.
+- Profile avatars sync from the Nuvio avatar catalog, and profile updates refresh on Who's Watching without leaving the screen.
+- Sideloaded-device login exits are still under investigation. If the app returns to the Apple TV Home screen after login, please send the Xcode device console or crash log.
 
 ## About
 
@@ -33,11 +47,12 @@ The original shared mobile code is still present in [composeApp](./composeApp), 
 
 - Native SwiftUI entry point in [NuvioTVApp.swift](./tvosApp/NuvioTV/Sources/NuvioTVApp.swift).
 - Apple TV tab navigation for Profile, Home, Search, Library, and Settings.
+- Home rows for synced Nuvio collections and add-on catalog lists.
 - Cinemeta-backed catalog and metadata repository with Stremio-compatible stream/subtitle addon hooks.
 - User-configurable Stremio stream addon manifest URL in Settings → Integrations → Add-ons.
 - QR-code and email login flow backed by Supabase configuration in [AuthConfig.swift](./tvosApp/NuvioTV/Sources/Core/Auth/AuthConfig.swift).
-- Local Swift profile/session stubs while the full shared account surface is being ported.
-- MPVKit-based player surface with tvOS remote input, skip controls, subtitle handling, and resume support.
+- tvOS profile/account sync surfaces while the full shared account experience is being ported.
+- MPVKit-based player surface with tvOS remote input, skip controls, saved audio/subtitle selections, idle-timer handling, and resume support.
 - tvOS app assets, splash screen, top shelf images, and Apple TV app icon stack in [Images.xcassets](./tvosApp/NuvioTV/Images.xcassets).
 
 ## Contributor Notes
@@ -50,6 +65,7 @@ Current tvOS status:
 - Search has received initial polish and bug fixes, including consistent poster sizing and watched checkmark badges.
 - Trailer playback now opens in the player, resolves YouTube trailer streams at 1080p or better when available, supports adaptive video/audio streams, and returns to the title details page afterward.
 - Home focus/hero behavior has been improved with smoother card focus, cached hero logo loading, and crossfaded hero/backdrop transitions.
+- Player polish now covers saved audio/subtitle selections, screensaver prevention during playback, and steadier Play/Pause focus.
 
 Known areas that still need work:
 
@@ -60,7 +76,9 @@ Known areas that still need work:
 - Vertical and horizontal scrolling still need more tuning on real devices.
 - The current layout is using the modern view only. Grid view and the other layout settings from Android TV still need to be brought over.
 - IntroDB integration is needed.
+- Next episode controls inside the player are not available yet.
 - Trakt is not implemented yet.
+- Some sideloaded-device login exits still need real-device logs to diagnose.
 
 The Android TV version is the main UX reference for this port. Before changing navigation, focus behavior, scrolling, player controls, layout settings, or core interaction patterns, run the Android TV app in an emulator and feel how that version behaves. The tvOS version does not need to be a pixel-for-pixel clone, but it should preserve the things that make the Android TV app work well on a couch/remote interface.
 
