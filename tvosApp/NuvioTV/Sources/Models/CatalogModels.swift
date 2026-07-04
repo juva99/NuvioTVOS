@@ -746,6 +746,7 @@ enum WatchedStore {
     static let changedNotification = Notification.Name("nuvio.tv.watched.changed")
 
     private static let baseKey = "nuvio.tv.watched.items"
+    private static let storageDirectoryName = "WatchedStore"
     private(set) static var activeProfileId: String?
 
     static func setActiveProfile(_ profileId: String?) {
@@ -759,7 +760,7 @@ enum WatchedStore {
     }
 
     static func items() -> [WatchedStoreItem] {
-        guard let data = UserDefaults.standard.data(forKey: storageKey),
+        guard let data = readData(forKey: storageKey),
               let decoded = try? JSONDecoder().decode([WatchedStoreItem].self, from: data) else {
             return []
         }
@@ -878,7 +879,7 @@ enum WatchedStore {
     }
 
     static func tombstones() -> [Tombstone] {
-        guard let data = UserDefaults.standard.data(forKey: tombstoneStorageKey),
+        guard let data = readData(forKey: tombstoneStorageKey),
               let decoded = try? JSONDecoder().decode([Tombstone].self, from: data) else {
             return []
         }
@@ -906,7 +907,7 @@ enum WatchedStore {
 
     private static func persistTombstones(_ entries: [Tombstone]) {
         guard let data = try? JSONEncoder().encode(entries) else { return }
-        UserDefaults.standard.set(data, forKey: tombstoneStorageKey)
+        writeData(data, forKey: tombstoneStorageKey)
     }
 
     static func replaceAll(_ newItems: [WatchedStoreItem]) {
@@ -915,7 +916,7 @@ enum WatchedStore {
 
     private static func persist(_ items: [WatchedStoreItem]) {
         guard let data = try? JSONEncoder().encode(items) else { return }
-        UserDefaults.standard.set(data, forKey: storageKey)
+        writeData(data, forKey: storageKey)
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -926,7 +927,61 @@ enum WatchedStore {
         defaults.dictionaryRepresentation().keys
             .filter { $0.hasPrefix(baseKey) }
             .forEach { defaults.removeObject(forKey: $0) }
+        try? FileManager.default.removeItem(at: storageDirectoryURL)
         NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    private static func readData(forKey key: String) -> Data? {
+        let fileURL = fileURL(forKey: key)
+        if let fileData = try? Data(contentsOf: fileURL) {
+            return fileData
+        }
+
+        guard let defaultsData = UserDefaults.standard.data(forKey: key) else {
+            return nil
+        }
+
+        // Older builds stored watched history in UserDefaults. Large accounts
+        // can exceed tvOS preferences limits, so migrate each profile key to a
+        // file the first time it is touched.
+        if writeData(defaultsData, forKey: key) {
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+        return defaultsData
+    }
+
+    @discardableResult
+    private static func writeData(_ data: Data, forKey key: String) -> Bool {
+        do {
+            try FileManager.default.createDirectory(
+                at: storageDirectoryURL,
+                withIntermediateDirectories: true
+            )
+            try data.write(to: fileURL(forKey: key), options: .atomic)
+            return true
+        } catch {
+            print("Nuvio watched storage write failed: \(error.localizedDescription)")
+            return false
+        }
+    }
+
+    private static var storageDirectoryURL: URL {
+        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return root.appendingPathComponent(storageDirectoryName, isDirectory: true)
+    }
+
+    private static func fileURL(forKey key: String) -> URL {
+        storageDirectoryURL.appendingPathComponent(fileName(forKey: key), isDirectory: false)
+    }
+
+    private static func fileName(forKey key: String) -> String {
+        Data(key.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "=", with: "")
+            + ".json"
     }
 }
 
