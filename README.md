@@ -35,7 +35,7 @@ Beta 2.2 focuses on player and profile polish:
 - The player disables the Apple TV idle timer while video is playing or buffering, preventing screensaver interruptions during playback.
 - Play/Pause focus is steadier when toggling playback from the Siri Remote.
 - Profile avatars sync from the Nuvio avatar catalog, and profile updates refresh on Who's Watching without leaving the screen.
-- Sideloaded-device login exits are still under investigation. If the app returns to the Apple TV Home screen after login, please send the Xcode device console or crash log.
+- A real-device login crash caused by large watched-history sync data has been fixed.
 
 ## About
 
@@ -78,7 +78,7 @@ Known areas that still need work:
 - IntroDB integration is needed.
 - Next episode controls inside the player are not available yet.
 - Trakt is not implemented yet.
-- Some sideloaded-device login exits still need real-device logs to diagnose.
+- If login still returns to the Apple TV Home screen on a real device, please send the device console or crash log.
 
 The Android TV version is the main UX reference for this port. Before changing navigation, focus behavior, scrolling, player controls, layout settings, or core interaction patterns, run the Android TV app in an emulator and feel how that version behaves. The tvOS version does not need to be a pixel-for-pixel clone, but it should preserve the things that make the Android TV app work well on a couch/remote interface.
 
