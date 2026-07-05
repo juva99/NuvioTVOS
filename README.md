@@ -25,17 +25,17 @@ The Apple TV build is published as a `.ipa` on the [Releases page](https://githu
 
 ## Latest tvOS Beta
 
-[Beta 2.2](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.2) is the current tvOS release. Download the unsigned IPA here:
+[Beta 2.3](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.3) is the current tvOS release. Download the unsigned IPA here:
 
-[NuvioTV-tvOS-beta-2.2.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.2/NuvioTV-tvOS-beta-2.2.ipa)
+[NuvioTV-tvOS-beta-2.3.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.3/NuvioTV-tvOS-beta-2.3.ipa)
 
-Beta 2.2 focuses on player and profile polish:
+Beta 2.3 brings player automation and stream reliability:
 
-- Audio language and subtitle choices are remembered per movie/episode and restored when playback opens again.
-- The player disables the Apple TV idle timer while video is playing or buffering, preventing screensaver interruptions during playback.
-- Play/Pause focus is steadier when toggling playback from the Siri Remote.
-- Profile avatars sync from the Nuvio avatar catalog, and profile updates refresh on Who's Watching without leaving the screen.
-- A real-device login crash caused by large watched-history sync data has been fixed.
+- Up Next auto-play: a Liquid Glass card near the end of an episode plays the next one in place after a 10-second countdown, so you never leave the player. Fast-forward cancels the countdown; toggle it in Settings → Playback → Auto-Play Next Episode.
+- Streams load from all add-ons in parallel and appear as they respond, instead of waiting for every add-on.
+- Expired stream links recover automatically: the player re-resolves a fresh link for the same title/episode and resumes where you left off.
+- Finishing an episode rolls Continue Watching over to the next episode ("Next Up") instead of dropping the series.
+- Home catalog layout (order and hidden catalogs) now follows your account.
 
 ## About
 
