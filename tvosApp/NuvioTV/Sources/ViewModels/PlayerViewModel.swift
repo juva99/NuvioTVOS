@@ -42,6 +42,43 @@ class PlayerViewModel: ObservableObject {
     /// Full-screen settings panel (subtitles / audio / speed) visibility.
     @Published var showSettingsPanel: Bool = false
 
+    // MARK: Next-episode auto-play
+
+    /// The episode that will play after this one, if any. Drives the Next
+    /// Episode card; nil for movies, trailers, or the last episode.
+    @Published var nextEpisode: NuvioVideo?
+    /// Whether the Next Episode card is visible (near the end of an episode
+    /// that has a follow-up).
+    @Published var showNextEpisodeCard: Bool = false
+    /// Seconds left on the auto-play countdown, or nil when there is no active
+    /// countdown (auto-play off, cancelled by a fast-forward, or not started).
+    @Published var nextEpisodeCountdown: Int?
+    /// True while the next episode's stream is being resolved and loaded, so the
+    /// card can show a spinner instead of a Play button.
+    @Published var isAdvancingEpisode: Bool = false
+
+    /// Ordered episode list for the current series (empty for movies/trailers).
+    private var seriesEpisodes: [NuvioVideo] = []
+    private var currentEpisodeVideo: NuvioVideo?
+    /// Resolves a next episode into a ready-to-play stream, provided by the app
+    /// layer (reuses the details screen's add-on fetch + smart selection).
+    private var resolveNextStream: ((NuvioVideo) async -> PreparedNextStream?)?
+    /// Master toggle from Settings → "Auto-Play Next Episode".
+    private var autoPlayNextEnabled: Bool = true
+    /// Set when the user fast-forwards with the card up: they may be watching
+    /// credits or a post-credit scene, so the countdown is cancelled (the card
+    /// stays for a manual Play). Reset on each new episode.
+    private var autoAdvanceDisabled: Bool = false
+    private var isAdvanceInFlight: Bool = false
+    /// Wall-clock moment the auto-advance fires, set when the card first arms so
+    /// the countdown is a fixed 10s from the card appearing (skips the credits)
+    /// rather than tracking the video's final seconds.
+    private var autoAdvanceDeadline: Date?
+    /// Card appears this many seconds before the end — generous enough to cover a
+    /// typical credit roll so the countdown auto-advances through it.
+    private static let nextCardLeadSeconds: Double = 120
+    private static let autoCountdownSeconds = 10
+
     /// The UIKit view controller that owns the Metal surface MPV renders into.
     /// PlayerView hosts this via a UIViewControllerRepresentable.
     let playerController = MPVPlayerViewController()
@@ -80,6 +117,13 @@ class PlayerViewModel: ObservableObject {
     private var replacementStreamHits = 0
     private static let replacementConfirmTicks = 4   // ~1s at the 0.25s poll cadence
 
+    /// Re-resolves a fresh stream for the current title/episode when a link
+    /// expires. Supplied by the app layer; nil disables silent recovery.
+    var reloadCurrentStream: (() async -> PreparedNextStream?)?
+    private var reloadAttempts = 0
+    private var isReloadingStream = false
+    private static let maxReloadAttempts = 2
+
     deinit {
         let controller = playerController
         let poll = pollTimer
@@ -94,44 +138,7 @@ class PlayerViewModel: ObservableObject {
 
     func load(url: URL, meta: NuvioMeta, subtitle: String, externalSubtitles: [NuvioSubtitle] = [], resumeFrom: Double?) {
         let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
-        self.title = meta.name
-        self.subtitle = subtitle
-        self.status = .buffering
-        self.activeMeta = meta
-        self.activeStreamURL = url.absoluteString
-        self.activeEpisodeNumbers = isTrailerPlayback
-            ? nil
-            : Self.episodeNumbers(fromSubtitle: subtitle)
-                ?? Self.episodeNumbers(fromStreamURL: url.absoluteString, isSeries: meta.isSeries)
-        let selectionKey = isTrailerPlayback
-            ? nil
-            : PlayerTrackSelectionStore.key(meta: meta, episode: self.activeEpisodeNumbers)
-        let savedSelection = selectionKey.flatMap { PlayerTrackSelectionStore.selection(for: $0) }
-        self.activeTrackSelectionKey = selectionKey
-        self.pendingTrackSelection = savedSelection
-        self.pendingResumeSeconds = isTrailerPlayback ? nil : resumeFrom
-        self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
-        self.didDetectReplacementStream = false
-        self.replacementStreamHits = 0
-        // The full list stays browsable in the subtitle panel; only smart-matched
-        // ones are eagerly loaded into mpv (loading all would fetch dozens of files).
-        self.availableExternalSubtitles = isTrailerPlayback ? [] : externalSubtitles
-        let smartMatched = isTrailerPlayback || savedSelection?.subtitle != nil
-            ? []
-            : Self.smartMatchedSubtitles(in: externalSubtitles)
-        self.pendingExternalSubtitles = Self.subtitlesToPreload(
-            smartMatched: smartMatched,
-            savedSelection: savedSelection,
-            availableExternalSubtitles: externalSubtitles
-        )
-        self.didAddExternalSubtitles = pendingExternalSubtitles.isEmpty
-        self.subtitleDelayMs = 0
-        self.audioDelayMs = 0
-        self.audioAmplificationDb = 0
-        self.didApplySavedAudioSelection = savedSelection?.audio == nil
-        self.didApplySavedSubtitleSelection = savedSelection?.subtitle == nil
-        self.didApplyAudioPreference = false
-        self.didApplySubtitlePreference = false
+        applyStreamState(url: url, meta: meta, subtitle: subtitle, externalSubtitles: externalSubtitles, resumeFrom: resumeFrom)
         guard !hasLoaded else { return }
         hasLoaded = true
 
@@ -171,6 +178,246 @@ class PlayerViewModel: ObservableObject {
         startPolling()
     }
 
+    /// Applies all per-stream state for a title/episode. Shared by the initial
+    /// `load` and the in-place `replaceStream` used for a seamless next-episode
+    /// advance, so both paths reset resume/track/subtitle state identically.
+    private func applyStreamState(url: URL, meta: NuvioMeta, subtitle: String, externalSubtitles: [NuvioSubtitle], resumeFrom: Double?) {
+        let isTrailerPlayback = subtitle == PlaybackMarkers.trailerSubtitle
+        self.title = meta.name
+        self.subtitle = subtitle
+        self.status = .buffering
+        self.activeMeta = meta
+        self.activeStreamURL = url.absoluteString
+        self.activeEpisodeNumbers = isTrailerPlayback
+            ? nil
+            : Self.episodeNumbers(fromSubtitle: subtitle)
+                ?? Self.episodeNumbers(fromStreamURL: url.absoluteString, isSeries: meta.isSeries)
+        let selectionKey = isTrailerPlayback
+            ? nil
+            : PlayerTrackSelectionStore.key(meta: meta, episode: self.activeEpisodeNumbers)
+        let savedSelection = selectionKey.flatMap { PlayerTrackSelectionStore.selection(for: $0) }
+        self.activeTrackSelectionKey = selectionKey
+        self.pendingTrackSelection = savedSelection
+        self.pendingResumeSeconds = isTrailerPlayback ? nil : resumeFrom
+        self.didApplyResume = false
+        self.expectedDurationSeconds = isTrailerPlayback ? nil : Self.expectedDuration(for: meta)
+        self.didDetectReplacementStream = false
+        self.replacementStreamHits = 0
+        // The full list stays browsable in the subtitle panel; only smart-matched
+        // ones are eagerly loaded into mpv (loading all would fetch dozens of files).
+        self.availableExternalSubtitles = isTrailerPlayback ? [] : externalSubtitles
+        let smartMatched = isTrailerPlayback || savedSelection?.subtitle != nil
+            ? []
+            : Self.smartMatchedSubtitles(in: externalSubtitles)
+        self.pendingExternalSubtitles = Self.subtitlesToPreload(
+            smartMatched: smartMatched,
+            savedSelection: savedSelection,
+            availableExternalSubtitles: externalSubtitles
+        )
+        self.didAddExternalSubtitles = pendingExternalSubtitles.isEmpty
+        self.subtitleDelayMs = 0
+        self.audioDelayMs = 0
+        self.audioAmplificationDb = 0
+        self.didApplySavedAudioSelection = savedSelection?.audio == nil
+        self.didApplySavedSubtitleSelection = savedSelection?.subtitle == nil
+        self.didApplyAudioPreference = false
+        self.didApplySubtitlePreference = false
+    }
+
+    // MARK: - Next-episode auto-play
+
+    /// Supplies the series context and the resolver that turns a next episode
+    /// into a ready-to-play stream. Called by PlayerView once per presented
+    /// episode; recomputed after every in-place advance.
+    func configureNextEpisode(
+        episodes: [NuvioVideo],
+        current: NuvioVideo?,
+        autoPlayEnabled: Bool,
+        resolver: @escaping (NuvioVideo) async -> PreparedNextStream?
+    ) {
+        seriesEpisodes = episodes
+        currentEpisodeVideo = current
+        autoPlayNextEnabled = autoPlayEnabled
+        resolveNextStream = resolver
+        autoAdvanceDisabled = false
+        showNextEpisodeCard = false
+        nextEpisodeCountdown = nil
+        autoAdvanceDeadline = nil
+        nextEpisode = Self.nextEpisode(after: current, in: episodes)
+    }
+
+    private static func nextEpisode(after current: NuvioVideo?, in episodes: [NuvioVideo]) -> NuvioVideo? {
+        guard let current, let index = episodes.firstIndex(where: { $0.id == current.id }) else { return nil }
+        let following = episodes.index(after: index)
+        return following < episodes.endIndex ? episodes[following] : nil
+    }
+
+    /// Re-evaluated on every poll tick: shows the card near the end and runs the
+    /// countdown in the final seconds when auto-play is armed.
+    private func updateNextEpisodeState() {
+        guard let _ = nextEpisode,
+              subtitle != PlaybackMarkers.trailerSubtitle,
+              !isAdvanceInFlight,
+              time.duration >= 60 else {
+            clearNextEpisodeCard()
+            return
+        }
+
+        let remaining = time.remaining
+        // Require both a near-the-end remaining time and majority progress, so a
+        // very short clip (where `remaining <= lead` is true almost from the
+        // start) can't pop the card — and auto-advance — before it's watched.
+        guard remaining > 0,
+              remaining <= Self.nextCardLeadSeconds,
+              time.current / time.duration >= 0.5 else {
+            clearNextEpisodeCard()
+            return
+        }
+
+        showNextEpisodeCard = true
+        guard autoPlayNextEnabled, !autoAdvanceDisabled else {
+            nextEpisodeCountdown = nil    // manual card: Play button, no timer
+            autoAdvanceDeadline = nil
+            return
+        }
+
+        // Fixed 10s countdown from when the card first arms, so it advances a few
+        // seconds into the credits instead of waiting for the very end.
+        if autoAdvanceDeadline == nil {
+            autoAdvanceDeadline = Date().addingTimeInterval(Double(Self.autoCountdownSeconds))
+        }
+        let secondsLeft = autoAdvanceDeadline?.timeIntervalSinceNow ?? 0
+        nextEpisodeCountdown = max(0, Int(secondsLeft.rounded(.up)))
+        if secondsLeft <= 0.05 { advance(userInitiated: false) }
+    }
+
+    private func clearNextEpisodeCard() {
+        if showNextEpisodeCard { showNextEpisodeCard = false }
+        if nextEpisodeCountdown != nil { nextEpisodeCountdown = nil }
+        autoAdvanceDeadline = nil
+    }
+
+    /// Play the next episode now (the card's Play button).
+    func playNextEpisode() {
+        advance(userInitiated: true)
+    }
+
+    private var canAutoAdvanceOnEnd: Bool {
+        nextEpisode != nil && autoPlayNextEnabled && !autoAdvanceDisabled
+            && subtitle != PlaybackMarkers.trailerSubtitle
+    }
+
+    private func advance(userInitiated: Bool) {
+        guard !isAdvanceInFlight,
+              let next = nextEpisode,
+              let resolver = resolveNextStream else { return }
+        isAdvanceInFlight = true
+        isAdvancingEpisode = true
+        nextEpisodeCountdown = nil
+
+        // Mark the finishing episode watched, then roll Continue Watching over to
+        // the next episode locally (like the phone) instead of removing the row.
+        // This keeps the series visible as "Next Up" even if the next stream fails
+        // to resolve or the user backs out before its own progress saves — the
+        // bug where a finished episode made the whole series vanish from Home.
+        if let activeMeta {
+            markWatchedIfNeeded()
+            ContinueWatchingStore.save(
+                meta: activeMeta,
+                streamUrl: "",
+                position: 1,
+                duration: max(time.duration, 120),
+                season: next.season,
+                episode: next.episode
+            )
+        }
+
+        Task { @MainActor in
+            let prepared = await resolver(next)
+            guard let prepared else {
+                // Couldn't resolve a stream for the next episode: disarm so the
+                // ended handler doesn't retry, and fall back to the normal
+                // end-of-playback flow (which returns to the details screen).
+                isAdvanceInFlight = false
+                isAdvancingEpisode = false
+                autoAdvanceDisabled = true
+                status = .ended
+                return
+            }
+            replaceStream(prepared: prepared, episode: next, resumeFrom: nil)
+        }
+    }
+
+    /// Swaps the currently playing stream in place — mpv `loadfile` replaces the
+    /// source without tearing the player down. `episode` non-nil advances to a new
+    /// episode (start from 0); nil keeps the current episode (used by the expired-
+    /// link reload, which resumes from `resumeFrom`).
+    private func replaceStream(prepared: PreparedNextStream, episode: NuvioVideo?, resumeFrom: Double?) {
+        guard let meta = activeMeta else { return }
+        applyStreamState(
+            url: prepared.url,
+            meta: meta,
+            subtitle: prepared.subtitleLine,
+            externalSubtitles: prepared.subtitles,
+            resumeFrom: resumeFrom
+        )
+        if let episode {
+            currentEpisodeVideo = episode
+            nextEpisode = Self.nextEpisode(after: episode, in: seriesEpisodes)
+        }
+        autoAdvanceDisabled = false
+        showNextEpisodeCard = false
+        nextEpisodeCountdown = nil
+        autoAdvanceDeadline = nil
+        isAdvanceInFlight = false
+        isAdvancingEpisode = false
+        isReloadingStream = false
+        showControls = false
+
+        playerController.loadFile(prepared.url.absoluteString)
+        if pollTimer == nil { startPolling() }
+    }
+
+    /// Silently recovers from an expired link: fetches a fresh stream for the
+    /// current title/episode and reloads it at the last known position, instead
+    /// of dead-ending on the "link expired" error. Falls back to that error only
+    /// when there's no resolver or the retries are exhausted.
+    private func recoverExpiredStream() {
+        guard let reloadCurrentStream,
+              reloadAttempts < Self.maxReloadAttempts,
+              !isReloadingStream else {
+            surfaceExpiredStreamError()
+            return
+        }
+        reloadAttempts += 1
+        isReloadingStream = true
+        showNextEpisodeCard = false
+        nextEpisodeCountdown = nil
+        autoAdvanceDeadline = nil
+        status = .buffering
+        playerController.pausePlayback()
+
+        // Resume where the real stream left off — progress saving skips the slate,
+        // so Continue Watching still holds the last genuine position.
+        let resume = activeMeta.flatMap { ContinueWatchingStore.item(for: $0.id)?.resumePosition }
+
+        Task { @MainActor in
+            guard let prepared = await reloadCurrentStream() else {
+                isReloadingStream = false
+                surfaceExpiredStreamError()
+                return
+            }
+            replaceStream(prepared: prepared, episode: nil, resumeFrom: resume)
+        }
+    }
+
+    private func surfaceExpiredStreamError() {
+        isReloadingStream = false
+        showNextEpisodeCard = false
+        nextEpisodeCountdown = nil
+        status = .error("This stream link has expired. Go back and start it again to load a fresh stream.")
+    }
+
     // MARK: - Polling (mirrors MPV state into the published properties)
 
     private func startPolling() {
@@ -195,22 +442,50 @@ class PlayerViewModel: ObservableObject {
         // (e.g. ElfHosted's "Link expired" video) that decodes cleanly, so it
         // never trips the mpv-error guard. Bail before any Continue Watching
         // write/clear so it can't overwrite or delete the real resume point.
+        // While a next-episode advance is resolving/loading, ignore the old
+        // stream's transient ended/loading state so nothing flickers or re-fires.
+        if isAdvanceInFlight { return }
+
         if subtitle != PlaybackMarkers.trailerSubtitle, detectReplacementStream(c) { return }
 
         applyPendingResumeIfNeeded()
         addPendingExternalSubtitlesIfNeeded()
 
         if c.isPlayerEnded {
+            // Roll straight into the next episode instead of ending, when armed —
+            // but only on a genuine watch-through. mpv can momentarily report
+            // "ended" while a fresh stream is still loading (position ~0); without
+            // this position check that would wrongly clear Continue Watching and
+            // jump to the following episode.
+            if canAutoAdvanceOnEnd, time.duration >= 60, time.current / time.duration >= 0.85 {
+                advance(userInitiated: false)
+                return
+            }
             // Only a genuine watch-through counts. A stream that dies early
             // (expired link, decode error) also reports "ended", and that must
             // neither mark the title watched nor wipe the resume point.
             if let activeMeta, subtitle != PlaybackMarkers.trailerSubtitle,
                time.duration >= 60, time.current / time.duration >= 0.85 {
-                ContinueWatchingStore.remove(metaId: activeMeta.id)
                 markWatchedIfNeeded()
+                if let next = nextEpisode {
+                    // Series with a follow-up: roll Continue Watching over to the
+                    // next episode so it shows as "Next Up" instead of vanishing.
+                    ContinueWatchingStore.save(
+                        meta: activeMeta,
+                        streamUrl: "",
+                        position: 1,
+                        duration: max(time.duration, 120),
+                        season: next.season,
+                        episode: next.episode
+                    )
+                } else {
+                    // Movie or final episode: nothing left to continue.
+                    ContinueWatchingStore.remove(metaId: activeMeta.id)
+                }
             }
         } else {
             saveProgressIfNeeded()
+            updateNextEpisodeState()
         }
 
         // Don't clobber an explicit error state.
@@ -237,6 +512,12 @@ class PlayerViewModel: ObservableObject {
         // timer no-ops if controls are already hidden or auto-hide is suspended.
         if status == .playing, previousStatus != .playing, showControls {
             scheduleControlsHide()
+        }
+
+        // A genuine stream is playing: allow the expired-link recovery to retry
+        // fresh next time (each expiry event gets its own attempt budget).
+        if status == .playing, time.duration >= 60, !didDetectReplacementStream {
+            reloadAttempts = 0
         }
 
         playbackSpeed = PlaybackSpeed(rawValue: c.currentSpeed) ?? playbackSpeed
@@ -309,14 +590,27 @@ class PlayerViewModel: ObservableObject {
 
     func skipForward() {
         playerController.seekByMs(15_000)
+        // Fast-forwarding near the end (e.g. into credits / a post-credit scene)
+        // cancels the auto-advance countdown; the card stays for a manual Play.
+        if showNextEpisodeCard { disableAutoAdvanceForCurrentEpisode() }
         showControls = true
         scheduleControlsHide()
     }
 
     func skipBackward() {
         playerController.seekByMs(-15_000)
+        if showNextEpisodeCard { disableAutoAdvanceForCurrentEpisode() }
         showControls = true
         scheduleControlsHide()
+    }
+
+    /// Cancels the countdown for the current episode after a manual seek; the
+    /// Next Episode card remains so the user can still advance by hand.
+    func disableAutoAdvanceForCurrentEpisode() {
+        guard !autoAdvanceDisabled else { return }
+        autoAdvanceDisabled = true
+        nextEpisodeCountdown = nil
+        autoAdvanceDeadline = nil
     }
 
     func setSpeed(_ speed: PlaybackSpeed) {
@@ -754,6 +1048,9 @@ class PlayerViewModel: ObservableObject {
     /// pauses and surfaces an error. Returns true once handled so the caller
     /// skips all progress bookkeeping. Idempotent after the first detection.
     private func detectReplacementStream(_ c: MPVPlayerViewController) -> Bool {
+        // A reload is already resolving/loading a fresh stream — treat the old
+        // slate as handled so no bookkeeping runs against it.
+        if isReloadingStream { return true }
         if didDetectReplacementStream { return true }
 
         // Judge only once the file has loaded; while opening, mpv reports a
@@ -768,7 +1065,8 @@ class PlayerViewModel: ObservableObject {
 
         didDetectReplacementStream = true
         playerController.pausePlayback()
-        status = .error("This stream link has expired. Go back and start it again to load a fresh stream.")
+        // Try to silently reload a fresh link before surfacing the error.
+        recoverExpiredStream()
         return true
     }
 

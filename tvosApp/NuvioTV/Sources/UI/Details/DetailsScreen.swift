@@ -13,7 +13,10 @@ import UIKit
 struct DetailsScreen: View {
     let id: String
     let type: String
-    let onPlayClick: (String, NuvioMeta, String, [NuvioSubtitle]) -> Void
+    /// (streamURL, meta, episodeSubtitleLine, streamSubtitles, currentEpisode, orderedEpisodes).
+    /// The last two carry series context for the player's next-episode auto-play;
+    /// both are empty/nil for movies and trailers.
+    let onPlayClick: (String, NuvioMeta, String, [NuvioSubtitle], NuvioVideo?, [NuvioVideo]) -> Void
     let onBack: () -> Void
 
     @StateObject private var viewModel: DetailsViewModel
@@ -38,7 +41,7 @@ struct DetailsScreen: View {
         id: String,
         type: String,
         repository: CatalogRepository,
-        onPlayClick: @escaping (String, NuvioMeta, String, [NuvioSubtitle]) -> Void,
+        onPlayClick: @escaping (String, NuvioMeta, String, [NuvioSubtitle], NuvioVideo?, [NuvioVideo]) -> Void,
         onBack: @escaping () -> Void
     ) {
         self.id = id
@@ -91,7 +94,7 @@ struct DetailsScreen: View {
                     onPlayClick: {
                         if let url = viewModel.uiState.streams.first?.url,
                            let meta = viewModel.uiState.meta {
-                            onPlayClick(url, meta, "", [])
+                            onPlayClick(url, meta, "", [], nil, [])
                         }
                     },
                     onWatchlistClick: { viewModel.toggleWatchlist() },
@@ -118,7 +121,7 @@ struct DetailsScreen: View {
                         onSelect: { stream in
                             if let url = stream.url {
                                 isStreamPickerPresented = false
-                                onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles)
+                                onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta))
                             }
                         },
                         onDismiss: {
@@ -199,7 +202,7 @@ struct DetailsScreen: View {
         ), let url = stream.url {
             isSmartPlaybackPending = false
             isStreamPickerPresented = false
-            onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles)
+            onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta))
         } else {
             isSmartPlaybackPending = false
             isStreamPickerPresented = true
@@ -212,6 +215,19 @@ struct DetailsScreen: View {
             secondary: subtitleLanguageSecondary,
             tertiary: subtitleLanguageTertiary
         )
+    }
+
+    /// The series' episodes in playback order (specials last), handed to the
+    /// player so it can offer the next one. Empty for movies.
+    private func orderedEpisodes(for meta: NuvioMeta) -> [NuvioVideo] {
+        guard meta.isSeries else { return [] }
+        return (meta.videos ?? []).sorted {
+            (Self.episodeSeasonSortKey($0.season), $0.episode) < (Self.episodeSeasonSortKey($1.season), $1.episode)
+        }
+    }
+
+    private static func episodeSeasonSortKey(_ season: Int) -> Int {
+        season <= 0 ? Int.max : season
     }
 
     private func shareContent(_ meta: NuvioMeta) {
@@ -246,7 +262,7 @@ struct DetailsScreen: View {
             let youtubeUrl = "https://www.youtube.com/watch?v=\(ytId)"
 
             await MainActor.run {
-                onPlayClick(youtubeUrl, meta, PlaybackMarkers.trailerSubtitle, [])
+                onPlayClick(youtubeUrl, meta, PlaybackMarkers.trailerSubtitle, [], nil, [])
             }
         }
     }
@@ -881,7 +897,7 @@ actor YouTubeTrailerResolver {
     }
 }
 
-private enum SmartPlaybackSelector {
+enum SmartPlaybackSelector {
     static func bestStream(
         from streams: [NuvioStream],
         qualityPreference: String,

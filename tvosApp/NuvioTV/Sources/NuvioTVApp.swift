@@ -55,6 +55,10 @@ struct ContentView: View {
     // lands, so freshly imported profile names show instead of local stubs.
     @State private var awaitingPostLoginSync = false
     @State private var selectedTab: TVTab = .home
+    /// Series context for the current playback, captured at play time so the
+    /// player can offer/auto-play the next episode. Empty for movies/trailers.
+    @State private var playbackEpisodes: [NuvioVideo] = []
+    @State private var playbackCurrentEpisode: NuvioVideo?
     @StateObject private var authManager = AuthManager()
     @StateObject private var profileViewModel = ProfileViewModel()
     @StateObject private var syncManager = NuvioSyncManager()
@@ -199,6 +203,21 @@ struct ContentView: View {
     /// the built-in player since they are YouTube-resolved. If the external app
     /// isn't installed / declines to open, playback falls back to the built-in
     /// player so the user is never left on a dead end.
+    /// Ordered episodes + the currently-resuming one for a Continue Watching /
+    /// Next Up item, so Home-launched playback can also auto-advance.
+    private static func episodeContext(for item: ContinueWatchingItem) -> (episodes: [NuvioVideo], current: NuvioVideo?) {
+        guard item.meta.isSeries, let videos = item.meta.videos, !videos.isEmpty else { return ([], nil) }
+        let sorted = videos.sorted {
+            (seasonSortKey($0.season), $0.episode) < (seasonSortKey($1.season), $1.episode)
+        }
+        let current = sorted.first { $0.season == item.season && $0.episode == item.episode }
+        return (sorted, current)
+    }
+
+    private static func seasonSortKey(_ season: Int) -> Int {
+        season <= 0 ? Int.max : season
+    }
+
     private func presentPlayback(
         url: URL,
         meta: NuvioMeta,
@@ -343,6 +362,11 @@ struct ContentView: View {
             onResumePlayback: { item in
                 let streamUrl = item.streamUrl.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !streamUrl.isEmpty, let url = URL(string: streamUrl) {
+                    // Carry episode context so the player can offer the next
+                    // episode when resuming straight from Home.
+                    let context = Self.episodeContext(for: item)
+                    playbackEpisodes = context.episodes
+                    playbackCurrentEpisode = context.current
                     presentPlayback(
                         url: url,
                         meta: item.meta,
@@ -366,9 +390,11 @@ struct ContentView: View {
             id: contentId,
             type: contentType,
             repository: CinemetaCatalogRepository(),
-            onPlayClick: { streamUrlString, meta, subtitle, externalSubtitles in
+            onPlayClick: { streamUrlString, meta, subtitle, externalSubtitles, currentEpisode, episodes in
                 if let url = URL(string: streamUrlString) {
                     let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
+                    playbackEpisodes = episodes
+                    playbackCurrentEpisode = currentEpisode
                     presentPlayback(
                         url: url,
                         meta: meta,
@@ -386,6 +412,49 @@ struct ContentView: View {
         )
     }
 
+    /// Resolves a next episode into a ready-to-play stream for the player's
+    /// seamless auto-advance: fetches the episode's streams (concurrently) and
+    /// applies the same smart selection the details screen uses. Returns nil when
+    /// nothing real is available, so the player falls back to a normal end.
+    private static func resolveNextEpisodeStream(episode: NuvioVideo, profileId: String?) async -> PreparedNextStream? {
+        await resolveStream(
+            contentId: episode.id,
+            type: "series",
+            subtitleLine: "S\(episode.season) · E\(episode.episode) · \(episode.title)",
+            profileId: profileId
+        )
+    }
+
+    /// Fetches a content id's streams (concurrently) and applies smart selection,
+    /// returning a ready-to-play stream. Used both to advance to the next episode
+    /// and to reload a fresh link for the current title when one expires. A fresh
+    /// fetch yields fresh (non-expired) URLs.
+    private static func resolveStream(contentId: String, type: String, subtitleLine: String, profileId: String?) async -> PreparedNextStream? {
+        let repository = CinemetaCatalogRepository()
+        let streams = ((try? await repository.getStreams(id: contentId, type: type)) ?? [])
+            .filter { $0.addonName != "Nuvio Sample" }   // ignore the placeholder fallback
+        guard !streams.isEmpty else { return nil }
+
+        let store = ProfileSettings.store(for: profileId)
+        let quality = store.string(forKey: SettingsKey.smartStreamQuality) ?? "Highest"
+        let matchSubtitles = store.object(forKey: SettingsKey.smartSubtitleMatching) as? Bool ?? true
+        let languages = SubtitleLanguagePreferences.ordered(
+            primary: store.string(forKey: SettingsKey.subtitleLanguage) ?? "System",
+            secondary: store.string(forKey: SettingsKey.subtitleLanguageSecondary) ?? "None",
+            tertiary: store.string(forKey: SettingsKey.subtitleLanguageTertiary) ?? "None"
+        )
+
+        let best = SmartPlaybackSelector.bestStream(
+            from: streams,
+            qualityPreference: quality,
+            subtitleLanguages: languages,
+            shouldMatchSubtitles: matchSubtitles
+        ) ?? SmartPlaybackSelector.playableStreams(from: streams).first
+
+        guard let best, let urlString = best.url, let url = URL(string: urlString) else { return nil }
+        return PreparedNextStream(url: url, subtitleLine: subtitleLine, subtitles: best.subtitles)
+    }
+
     @ViewBuilder
     private func playerScreen(
         url: URL,
@@ -395,12 +464,27 @@ struct ContentView: View {
         resumeFrom: Double?
     ) -> some View {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
+        let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
+        let autoPlayNext = store.object(forKey: SettingsKey.autoPlayNext) as? Bool ?? true
         PlayerView(
             url: url,
             meta: meta,
             subtitle: subtitle,
             externalSubtitles: externalSubtitles,
             resumeFrom: resumeFrom,
+            episodes: isTrailer ? [] : playbackEpisodes,
+            currentEpisode: isTrailer ? nil : playbackCurrentEpisode,
+            autoPlayNextEnabled: autoPlayNext,
+            resolveNextStream: (isTrailer || !meta.isSeries) ? nil : { episode in
+                await Self.resolveNextEpisodeStream(episode: episode, profileId: profileViewModel.activeProfile?.id)
+            },
+            reloadCurrentStream: isTrailer ? nil : {
+                let profileId = profileViewModel.activeProfile?.id
+                if let episode = playbackCurrentEpisode {
+                    return await Self.resolveNextEpisodeStream(episode: episode, profileId: profileId)
+                }
+                return await Self.resolveStream(contentId: meta.id, type: meta.type, subtitleLine: subtitle, profileId: profileId)
+            },
             onFinished: isTrailer ? {
                 withAnimation(.easeInOut(duration: 0.24)) {
                     activeScreen = .details(id: meta.id, type: meta.type)
@@ -543,6 +627,69 @@ private actor BackdropImageCache {
     }
 }
 
+/// Composites the active profile's avatar (catalog face over its accent circle)
+/// into a static, circular bitmap for use as the profile tab's icon.
+///
+/// tvOS tab items can only display a still image, not a live `AsyncImage`/SwiftUI
+/// view, so `ProfileAvatarView` can't be dropped into a `.tabItem` directly. We
+/// draw the same composition off-screen once per avatar and hand the finished
+/// bitmap to the tab bar; until it's ready (or when no avatar is set) the tab
+/// falls back to the generic person symbol.
+@MainActor
+final class ProfileTabAvatarRenderer: ObservableObject {
+    @Published private(set) var image: UIImage?
+    /// The avatar id the current `image` (or in-flight render) belongs to, so we
+    /// skip redundant work and ignore renders that finish after a profile swap.
+    private var renderedAvatarId: String?
+
+    /// Point size of the composited icon. tvOS scales tab images down to fit, so
+    /// a generous size keeps the avatar crisp in the sidebar.
+    private let diameter: CGFloat = 50
+
+    func refresh(avatarId: String?) {
+        guard let avatarId, !avatarId.isEmpty,
+              let item = AvatarCatalogStore.shared.item(for: avatarId),
+              let url = item.imageURL else {
+            // No avatar chosen, or the catalog hasn't loaded yet: show the
+            // symbol. Clearing `renderedAvatarId` lets a later `refresh` (once
+            // the catalog arrives) re-attempt the render.
+            renderedAvatarId = nil
+            image = nil
+            return
+        }
+        guard avatarId != renderedAvatarId else { return }
+        renderedAvatarId = avatarId
+        image = nil
+        let background = UIColor(item.backgroundColor)
+        Task { await render(avatarId: avatarId, url: url, background: background) }
+    }
+
+    private func render(avatarId: String, url: URL, background: UIColor) async {
+        guard let face = await BackdropImageCache.shared.image(for: url) else { return }
+        let size = CGSize(width: diameter, height: diameter)
+        let composed = UIGraphicsImageRenderer(size: size).image { ctx in
+            let rect = CGRect(origin: .zero, size: size)
+            ctx.cgContext.addEllipse(in: rect)
+            ctx.cgContext.clip()
+            background.setFill()
+            ctx.fill(rect)
+
+            // Aspect-fill the (transparent-PNG) face inside the circle.
+            let faceSize = face.size
+            guard faceSize.width > 0, faceSize.height > 0 else { return }
+            let scale = max(rect.width / faceSize.width, rect.height / faceSize.height)
+            let drawSize = CGSize(width: faceSize.width * scale, height: faceSize.height * scale)
+            let origin = CGPoint(x: (rect.width - drawSize.width) / 2,
+                                 y: (rect.height - drawSize.height) / 2)
+            face.draw(in: CGRect(origin: origin, size: drawSize))
+        }.withRenderingMode(.alwaysOriginal)
+
+        // Bail if the active profile changed while the face was downloading.
+        guard renderedAvatarId == avatarId else { return }
+        image = composed
+    }
+}
+
 private struct TVMainTabView: View {
     @Binding var selectedTab: TVTab
     let activeProfile: Profile?
@@ -561,6 +708,7 @@ private struct TVMainTabView: View {
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
     @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
+    @StateObject private var profileTabAvatar = ProfileTabAvatarRenderer()
 
     /// Name shown on the fallback profile tab (tvOS < 27), mirroring the
     /// sidebar header's display-name logic.
@@ -601,10 +749,15 @@ private struct TVMainTabView: View {
                     onChangeAvatar: onChangeProfileAvatar
                 )
                     .tabItem {
-                        Label(
-                            profileTabTitle,
-                            systemImage: ProfileAvatarCatalog.symbolName(for: activeProfile?.avatarId)
-                        )
+                        Label {
+                            Text(profileTabTitle)
+                        } icon: {
+                            if let avatar = profileTabAvatar.image {
+                                Image(uiImage: avatar).renderingMode(.original)
+                            } else {
+                                Image(systemName: ProfileAvatarCatalog.symbolName(for: activeProfile?.avatarId))
+                            }
+                        }
                     }
                     .tag(TVTab.profile)
             }
@@ -649,6 +802,18 @@ private struct TVMainTabView: View {
                 .tag(TVTab.settings)
         }
         .background(Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea())
+        .onAppear {
+            AvatarCatalogStore.shared.loadIfNeeded()
+            profileTabAvatar.refresh(avatarId: activeProfile?.avatarId)
+        }
+        .onChange(of: activeProfile?.avatarId) { newValue in
+            profileTabAvatar.refresh(avatarId: newValue)
+        }
+        // Re-attempt once the catalog finishes loading, since the first refresh
+        // can't resolve the avatar image before then.
+        .onReceive(AvatarCatalogStore.shared.$items) { _ in
+            profileTabAvatar.refresh(avatarId: activeProfile?.avatarId)
+        }
     }
 }
 
@@ -1486,6 +1651,27 @@ enum TVHomeCatalogOrder {
         guard let data = try? JSONEncoder().encode(keys) else { return }
         ProfileSettings.current.set(data, forKey: SettingsKey.homeCatalogOrder)
         NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    /// Account catalog keys (`<addonId>_<type>_<catalogId>`) the user has hidden
+    /// from Home on another device, pulled from the account. The repository
+    /// consults this to drop hidden catalog rows before building Home.
+    static func disabledCatalogKeys() -> Set<String> {
+        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogDisabled),
+              let keys = try? JSONDecoder().decode([String].self, from: data) else { return [] }
+        return Set(keys)
+    }
+
+    /// Account catalog keys in the account's Home order → position, used by the
+    /// repository to order the add-on catalog rows. Empty when nothing synced.
+    static func syncedCatalogOrderIndex() -> [String: Int] {
+        guard let data = ProfileSettings.current.data(forKey: SettingsKey.homeCatalogSyncedOrder),
+              let keys = try? JSONDecoder().decode([String].self, from: data) else { return [:] }
+        var index: [String: Int] = [:]
+        for (position, key) in keys.enumerated() where index[key] == nil {
+            index[key] = position
+        }
+        return index
     }
 
     /// Saved order first (rows the user has placed), then any new rows in

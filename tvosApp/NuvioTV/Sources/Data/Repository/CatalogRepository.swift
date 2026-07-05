@@ -21,6 +21,13 @@ protocol CatalogRepository {
     /// Get available streams for content
     func getStreams(id: String, type: String) async throws -> [NuvioStream]
 
+    /// Progressive variant of `getStreams`: yields the accumulated stream list
+    /// each time another add-on returns, so the picker can show the first
+    /// add-on's results immediately and keep filling in the rest as they land
+    /// (mirrors how Stremio/Fusion surface streams). The default falls back to
+    /// a single `getStreams` batch for repositories that don't override it.
+    func streamsProgressively(id: String, type: String) -> AsyncStream<[NuvioStream]>
+
     /// Search for content
     func search(query: String) async throws -> [NuvioMeta]
 
@@ -48,6 +55,26 @@ protocol CatalogRepository {
     /// Resolve a synced collection folder's add-on catalog sources into items.
     /// Unresolvable sources (unknown add-on ids, TMDB/Trakt) are skipped.
     func getCollectionFolderItems(sources: [NuvioCollectionCatalogSource], limit: Int) async -> [NuvioMeta]
+}
+
+extension CatalogRepository {
+    /// Fallback progressive wrapper: emits the full `getStreams` result as a
+    /// single batch. Repositories that fetch from multiple add-ons should
+    /// override this to emit results as each add-on returns.
+    func streamsProgressively(id: String, type: String) -> AsyncStream<[NuvioStream]> {
+        AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let task = Task {
+                do {
+                    let streams = try await getStreams(id: id, type: type)
+                    if !Task.isCancelled { continuation.yield(streams) }
+                } catch {
+                    print("Failed to load streams: \(error.localizedDescription)")
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
 }
 
 /// One selectable add-on catalog, offered by the Collections editor when
@@ -122,6 +149,9 @@ final class CinemetaCatalogRepository: CatalogRepository {
     /// required genre is satisfied with the catalog's first declared option.
     private func addonHomeCatalogs() async -> [NuvioCatalog] {
         let showAddonNames = ProfileSettings.current.object(forKey: SettingsKey.catalogAddonNames) as? Bool ?? true
+        // Catalogs the user hid from Home on another device (synced from the
+        // account). Their key format matches the tvOS catalog id sans `addon_`.
+        let disabledCatalogKeys = TVHomeCatalogOrder.disabledCatalogKeys()
         let maxRows = 24
         var catalogs: [NuvioCatalog] = []
 
@@ -133,6 +163,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
             let base = manifestURL.deletingLastPathComponent()
             for catalog in manifest.catalogs ?? [] where catalog.eligibleForHome {
                 guard catalogs.count < maxRows else { break }
+                // Skip catalogs the account has disabled for Home.
+                if disabledCatalogKeys.contains("\(manifest.id)_\(catalog.type)_\(catalog.id)") { continue }
                 let genre = catalog.requiresGenre ? catalog.firstGenreOption : nil
                 if catalog.requiresGenre && genre == nil { continue }
 
@@ -166,7 +198,31 @@ final class CinemetaCatalogRepository: CatalogRepository {
                 }
             }
         }
+
+        // Order the add-on rows to match the account's Home layout. Rows the
+        // account hasn't placed keep their natural (manifest) order, after the
+        // placed ones — mirroring the phone/Google-TV apps.
+        let orderIndex = TVHomeCatalogOrder.syncedCatalogOrderIndex()
+        if !orderIndex.isEmpty {
+            catalogs = catalogs
+                .enumerated()
+                .sorted { lhs, rhs in
+                    let lKey = Self.accountCatalogKey(fromCatalogId: lhs.element.id)
+                    let rKey = Self.accountCatalogKey(fromCatalogId: rhs.element.id)
+                    let lRank = orderIndex[lKey] ?? Int.max
+                    let rRank = orderIndex[rKey] ?? Int.max
+                    return lRank != rRank ? lRank < rRank : lhs.offset < rhs.offset
+                }
+                .map(\.element)
+        }
         return catalogs
+    }
+
+    /// Maps an add-on catalog's tvOS id (`addon_<addonId>_<type>_<catalogId>`)
+    /// back to the account key format (`<addonId>_<type>_<catalogId>`) used by
+    /// the synced Home layout.
+    private static func accountCatalogKey(fromCatalogId id: String) -> String {
+        id.hasPrefix("addon_") ? String(id.dropFirst("addon_".count)) : id
     }
 
     func getMetadata(id: String, type: String) async throws -> NuvioMeta {
@@ -273,44 +329,125 @@ final class CinemetaCatalogRepository: CatalogRepository {
     }
 
     func getStreams(id: String, type: String) async throws -> [NuvioStream] {
+        // Fan the add-on requests out concurrently: total latency is the
+        // slowest add-on, not the sum of them all. A slow or dead add-on no
+        // longer starves the ones that respond quickly.
         var addonStreams: [NuvioStream] = []
-
-        for addon in streamAddons {
-            do {
-                let response: StremioStreamResponse = try await fetch(addon.streamURL(type: type, id: id))
-                addonStreams += response.streams.compactMap { stream in
-                    stream.toNuvioStream(addonName: addon.name)
-                }
-            } catch {
-                print("Failed to load streams from \(addon.name): \(error.localizedDescription)")
+        await withTaskGroup(of: [NuvioStream].self) { group in
+            for addon in streamAddons {
+                let url = addon.streamURL(type: type, id: id)
+                let name = addon.name
+                group.addTask { await Self.fetchStreams(from: url, addonName: name) }
+            }
+            for await streams in group {
+                addonStreams += streams
             }
         }
 
-        if !addonStreams.isEmpty {
-            let addonSubtitles = await fetchSubtitleAddons(id: id, type: type)
-            if !addonSubtitles.isEmpty {
-                addonStreams = addonStreams.map { stream in
-                    NuvioStream(
-                        url: stream.url,
-                        name: stream.name,
-                        description: stream.description,
-                        addonName: stream.addonName,
-                        subtitles: Self.mergedSubtitles(stream.subtitles, addonSubtitles)
-                    )
-                }
-            }
-            return Array(addonStreams.prefix(80))
-        }
-
-        return [
-            NuvioStream(
-                url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
-                name: "Sample Stream",
-                description: "Direct 1080p fallback stream",
-                addonName: "Nuvio Sample"
-            )
-        ]
+        guard !addonStreams.isEmpty else { return [Self.sampleStream] }
+        let addonSubtitles = await fetchSubtitleAddons(id: id, type: type)
+        return Self.decorate(addonStreams, with: addonSubtitles)
     }
+
+    func streamsProgressively(id: String, type: String) -> AsyncStream<[NuvioStream]> {
+        let addons = streamAddons
+        let subtitleAddons = self.subtitleAddons
+        let subtitleType = Self.isSeriesType(type) ? "series" : "movie"
+
+        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
+            let task = Task {
+                var accumulated: [NuvioStream] = []
+                var subtitles: [NuvioSubtitle] = []
+
+                await withTaskGroup(of: StreamFetchResult.self) { group in
+                    for addon in addons {
+                        let url = addon.streamURL(type: type, id: id)
+                        let name = addon.name
+                        group.addTask { .streams(await Self.fetchStreams(from: url, addonName: name)) }
+                    }
+                    for addon in subtitleAddons {
+                        let url = addon.subtitleURL(type: subtitleType, id: id)
+                        let name = addon.name
+                        group.addTask { .subtitles(await Self.fetchSubtitles(from: url, source: name)) }
+                    }
+
+                    for await result in group {
+                        if Task.isCancelled { break }
+                        switch result {
+                        case .streams(let new):
+                            guard !new.isEmpty else { continue }
+                            accumulated += new
+                            continuation.yield(Self.decorate(accumulated, with: subtitles))
+                        case .subtitles(let subs):
+                            guard !subs.isEmpty else { continue }
+                            subtitles = Self.mergedSubtitles(subtitles, subs)
+                            // Re-emit so already-shown streams pick up subtitles.
+                            if !accumulated.isEmpty {
+                                continuation.yield(Self.decorate(accumulated, with: subtitles))
+                            }
+                        }
+                    }
+                }
+
+                // No add-on produced anything: fall back to the sample stream so
+                // the picker never dead-ends on "No playable streams found".
+                if !Task.isCancelled && accumulated.isEmpty {
+                    continuation.yield([Self.sampleStream])
+                }
+                continuation.finish()
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
+    /// Fetch and decode one stream add-on's response, mapping to NuvioStreams.
+    /// A failure (timeout, bad payload, dead endpoint) yields an empty list so
+    /// it can't block the other add-ons.
+    private static func fetchStreams(from url: URL, addonName: String) async -> [NuvioStream] {
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return [] }
+            let decoded = try JSONDecoder().decode(StremioStreamResponse.self, from: data)
+            return decoded.streams.compactMap { $0.toNuvioStream(addonName: addonName) }
+        } catch {
+            print("Failed to load streams from \(addonName): \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private static func fetchSubtitles(from url: URL, source: String) async -> [NuvioSubtitle] {
+        do {
+            let (data, response) = try await URLSession.shared.data(from: url)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return [] }
+            let decoded = try JSONDecoder().decode(StremioSubtitleResponse.self, from: data)
+            return decoded.subtitles.compactMap { $0.toNuvioSubtitle(source: source) }
+        } catch {
+            print("Failed to load subtitles from \(source): \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    /// Cap the list at 80 and merge in any subtitle-add-on results.
+    private static func decorate(_ streams: [NuvioStream], with subtitles: [NuvioSubtitle]) -> [NuvioStream] {
+        let capped = Array(streams.prefix(80))
+        guard !subtitles.isEmpty else { return capped }
+        return capped.map { stream in
+            NuvioStream(
+                url: stream.url,
+                name: stream.name,
+                description: stream.description,
+                addonName: stream.addonName,
+                subtitles: mergedSubtitles(stream.subtitles, subtitles)
+            )
+        }
+    }
+
+    private static let sampleStream = NuvioStream(
+        url: "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+        name: "Sample Stream",
+        description: "Direct 1080p fallback stream",
+        addonName: "Nuvio Sample"
+    )
 
     private func fetchSubtitleAddons(id: String, type: String) async -> [NuvioSubtitle] {
         let subtitleType = Self.isSeriesType(type) ? "series" : "movie"
@@ -574,6 +711,13 @@ private struct AddonManifestCatalogExtra: Decodable {
 
 private struct CinemetaMetaResponse: Decodable {
     let meta: CinemetaMeta
+}
+
+/// One result arriving from the progressive stream fetch task group — either a
+/// stream add-on's streams or the subtitle add-ons' subtitles.
+private enum StreamFetchResult {
+    case streams([NuvioStream])
+    case subtitles([NuvioSubtitle])
 }
 
 private struct StremioStreamAddon {

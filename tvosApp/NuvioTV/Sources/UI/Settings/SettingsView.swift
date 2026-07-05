@@ -61,6 +61,16 @@ enum SettingsKey {
     /// on every load so the Settings reorder list knows the display names.
     /// Local-only derived data (not part of `all`).
     static let homeCatalogTitles = "nuvio.tv.settings.layout.homeCatalogTitles"
+    /// JSON `[String]` of account catalog keys (`<addonId>_<type>_<catalogId>`)
+    /// the user has hidden from Home. Pulled from the account's home-catalog
+    /// settings; the repository skips these rows. Not part of `all` — it syncs
+    /// through its own RPC, not the tvOS settings blob.
+    static let homeCatalogDisabled = "nuvio.tv.settings.layout.homeCatalogDisabled"
+    /// JSON `[String]` of account catalog keys (`<addonId>_<type>_<catalogId>`)
+    /// in the account's Home order. The repository orders the add-on catalog
+    /// rows by this; kept separate from `homeCatalogOrder` (the local tvOS
+    /// reorder) so a pull never disturbs the built-in rows or a local reorder.
+    static let homeCatalogSyncedOrder = "nuvio.tv.settings.layout.homeCatalogSyncedOrder"
     static let heroEnabled = "nuvio.tv.settings.layout.heroEnabled"
     static let posterLabels = "nuvio.tv.settings.layout.posterLabels"
     static let catalogAddonNames = "nuvio.tv.settings.layout.catalogAddonNames"
@@ -1090,7 +1100,7 @@ private struct PlaybackSettingsView: View {
 
                 SettingsToggleRow(
                     title: "Auto-Play Next Episode",
-                    subtitle: "Start the next episode automatically when available",
+                    subtitle: "Play the next episode automatically with a 10-second countdown. Off keeps the Next Episode card with a manual Play.",
                     isOn: $autoPlayNext,
                     accentColor: accentColor
                 )

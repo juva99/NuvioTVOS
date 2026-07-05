@@ -9,11 +9,22 @@ struct PlayerView: View {
     let subtitle: String
     let externalSubtitles: [NuvioSubtitle]
     let resumeFrom: Double?
+    /// Episode context for the Netflix-style auto-play. Empty for movies/trailers.
+    var episodes: [NuvioVideo] = []
+    var currentEpisode: NuvioVideo? = nil
+    var autoPlayNextEnabled: Bool = true
+    /// Resolves a next episode into a ready-to-play stream (add-on fetch + smart
+    /// selection), supplied by the app layer. Nil disables auto-advance.
+    var resolveNextStream: ((NuvioVideo) async -> PreparedNextStream?)? = nil
+    /// Re-resolves a fresh stream for the *current* title/episode, used to
+    /// silently recover from an expired link. Nil disables auto-reload.
+    var reloadCurrentStream: (() async -> PreparedNextStream?)? = nil
     var onFinished: (() -> Void)? = nil
     var onBack: () -> Void
 
     @State private var didHandleFinished = false
     @FocusState private var remoteInputFocused: Bool
+    @FocusState private var nextEpisodeFocused: Bool
 
     var body: some View {
         ZStack {
@@ -68,10 +79,32 @@ struct PlayerView: View {
             Color.clear
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
-                .focusable(!viewModel.showControls)
+                .focusable(!viewModel.showControls && !viewModel.showNextEpisodeCard)
                 .focused($remoteInputFocused)
                 .onTapGesture { viewModel.revealControls() }
                 .accessibilityHidden(true)
+
+            // Netflix-style next-episode prompt, shown near the end. Visible even
+            // when the transport controls are up (raised above them); focusable
+            // only when the controls are down so it doesn't fight them for focus.
+            // Left/Right still fast-forward, which cancels the countdown.
+            if viewModel.showNextEpisodeCard, let next = viewModel.nextEpisode {
+                NextEpisodeOverlay(
+                    episode: next,
+                    countdown: viewModel.nextEpisodeCountdown,
+                    isAdvancing: viewModel.isAdvancingEpisode,
+                    isFocused: nextEpisodeFocused && !viewModel.showControls,
+                    onPlay: { viewModel.playNextEpisode() }
+                )
+                .focusable(!viewModel.showControls)
+                .focused($nextEpisodeFocused)
+                .onTapGesture { viewModel.playNextEpisode() }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
+                .padding(.trailing, 60)
+                .padding(.bottom, viewModel.showControls ? 200 : 54)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(3)
+            }
 
             // Kept mounted (not gated by an `if`) so the hide animates too: removing
             // a view that holds tvOS focus makes the focus engine finalize the
@@ -96,9 +129,19 @@ struct PlayerView: View {
             }
         }
         .animation(.playerControls, value: viewModel.showSettingsPanel)
+        .animation(.playerControls, value: viewModel.showNextEpisodeCard)
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             viewModel.load(url: url, meta: meta, subtitle: subtitle, externalSubtitles: externalSubtitles, resumeFrom: resumeFrom)
+            viewModel.reloadCurrentStream = reloadCurrentStream
+            if let resolveNextStream {
+                viewModel.configureNextEpisode(
+                    episodes: episodes,
+                    current: currentEpisode,
+                    autoPlayEnabled: autoPlayNextEnabled,
+                    resolver: resolveNextStream
+                )
+            }
         }
         .onDisappear {
             UIApplication.shared.isIdleTimerDisabled = false
@@ -117,6 +160,16 @@ struct PlayerView: View {
         .onChange(of: viewModel.showControls) { isVisible in
             if isVisible {
                 remoteInputFocused = false
+            } else if viewModel.showNextEpisodeCard {
+                focusNextEpisode()
+            } else {
+                focusRemoteInput()
+            }
+        }
+        .onChange(of: viewModel.showNextEpisodeCard) { visible in
+            guard !viewModel.showControls else { return }
+            if visible {
+                focusNextEpisode()
             } else {
                 focusRemoteInput()
             }
@@ -150,6 +203,12 @@ struct PlayerView: View {
     private func focusRemoteInput() {
         DispatchQueue.main.async {
             remoteInputFocused = true
+        }
+    }
+
+    private func focusNextEpisode() {
+        DispatchQueue.main.async {
+            nextEpisodeFocused = true
         }
     }
 }

@@ -14,6 +14,7 @@ class DetailsViewModel: ObservableObject {
     @Published private(set) var uiState = DetailsUiState()
 
     private let repository: CatalogRepository
+    private var streamTask: Task<Void, Never>?
 
     init(repository: CatalogRepository) {
         self.repository = repository
@@ -44,18 +45,24 @@ class DetailsViewModel: ObservableObject {
 
     /// Load the playable streams for a given title/episode id, replacing any
     /// previously loaded streams so the picker never shows stale results.
+    ///
+    /// Streams arrive progressively: the first add-on to respond is shown right
+    /// away and later add-ons are appended as they land, rather than blocking on
+    /// every add-on before showing anything. `isLoadingStreams` stays true until
+    /// every add-on has reported, so smart auto-play still waits for the full set.
     func prepareStreams(forId streamId: String, type: String) {
-        Task {
+        // Cancel any in-flight fetch (e.g. from a previously selected episode) so
+        // its late results can't overwrite the newly requested ones.
+        streamTask?.cancel()
+        streamTask = Task {
             uiState.streams = []
             uiState.isLoadingStreams = true
-            do {
-                let streams = try await repository.getStreams(id: streamId, type: type)
+            for await streams in repository.streamsProgressively(id: streamId, type: type) {
+                if Task.isCancelled { return }
                 uiState.streams = streams
+            }
+            if !Task.isCancelled {
                 uiState.isLoadingStreams = false
-            } catch {
-                // Streams failure is not critical, just log it
-                uiState.isLoadingStreams = false
-                print("Failed to load streams: \(error.localizedDescription)")
             }
         }
     }

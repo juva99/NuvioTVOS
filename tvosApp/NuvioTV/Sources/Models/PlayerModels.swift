@@ -116,6 +116,16 @@ private extension CharacterSet {
     )
 }
 
+/// A next-episode stream the player resolved and is ready to hand to mpv for a
+/// seamless in-place advance. Built by the app layer's resolver (reusing the
+/// same add-on fetch + smart-stream selection the details screen uses).
+struct PreparedNextStream {
+    let url: URL
+    /// The "S1 · E2 · Title" line the player shows and parses episode numbers from.
+    let subtitleLine: String
+    let subtitles: [NuvioSubtitle]
+}
+
 struct PlayerTime: Equatable {
     var current: Double = 0
     var duration: Double = 0

@@ -275,6 +275,21 @@ final class NuvioSyncManager: ObservableObject {
                 print("Nuvio collections sync failed: \(error.localizedDescription)")
             }
 
+            do {
+                if let catalogSettings = try await client.pullHomeCatalogSettings(
+                    session: session,
+                    remoteProfileId: remoteProfileId
+                ) {
+                    try ensureStillSyncing()
+                    client.applyHomeCatalogSettings(catalogSettings, localProfileId: activeProfile.id)
+                    print("Nuvio sync pulled home catalog settings (\(catalogSettings.items.count) item(s)).")
+                }
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                print("Nuvio home catalog sync failed: \(error.localizedDescription)")
+            }
+
             // Pull each watch-state collection independently so one failing
             // request (or one undecodable payload) can't abort the others.
             var pullFailures = 0
@@ -670,6 +685,56 @@ fileprivate final class SupabaseSyncClient {
         defaults.set(urls.first, forKey: SettingsKey.streamAddonManifestURL)
         defaults.set(urls.joined(separator: "\n"), forKey: SettingsKey.streamAddonManifestURLs)
         return urls.count
+    }
+
+    /// Home-catalog settings platforms in priority order — the shared blob the
+    /// mobile/Google-TV apps now write, then the legacy per-platform rows.
+    private static let homeCatalogSyncPlatforms = ["home_catalog_shared", "tv", "mobile"]
+
+    /// Pulls the account's Home catalog layout (which catalogs show on Home and
+    /// in what order), mirroring Android's `HomeCatalogSettingsSyncService`.
+    /// Returns the first platform that has any items, preferring the shared blob.
+    func pullHomeCatalogSettings(session: AuthSession, remoteProfileId: Int) async throws -> HomeCatalogSyncPayload? {
+        for platform in Self.homeCatalogSyncPlatforms {
+            // Each platform is queried independently so one failing (or absent
+            // on older backends) can't stop the others from being tried.
+            guard let data = try? await rpcData(
+                "sync_pull_home_catalog_settings",
+                session: session,
+                params: ["p_profile_id": remoteProfileId, "p_platform": platform]
+            ) else { continue }
+            guard let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+                  let settingsJSON = rows.first?["settings_json"] as? [String: Any] else {
+                continue
+            }
+            let payload = HomeCatalogSyncPayload(dictionary: settingsJSON)
+            if !payload.items.isEmpty { return payload }
+        }
+        return nil
+    }
+
+    /// Applies the pulled Home catalog layout: records the add-on catalog order
+    /// (so the repository sorts Home's add-on rows to match the account) and the
+    /// set of catalogs hidden from Home (so the repository drops them). Both are
+    /// stored in account key format `<addonId>_<type>_<catalogId>`.
+    func applyHomeCatalogSettings(_ payload: HomeCatalogSyncPayload, localProfileId: String) {
+        // Collections map to per-folder rows on tvOS, so only catalog items
+        // participate in the order/disabled sets here.
+        let catalogItems = payload.items.filter { !$0.isCollection }
+        let orderKeys = catalogItems
+            .sorted { $0.order < $1.order }
+            .map { "\($0.addonId)_\($0.type)_\($0.catalogId)" }
+        let disabledKeys = catalogItems
+            .filter { !$0.enabled }
+            .map { "\($0.addonId)_\($0.type)_\($0.catalogId)" }
+
+        let defaults = ProfileSettings.store(for: localProfileId)
+        if let data = try? JSONEncoder().encode(orderKeys) {
+            defaults.set(data, forKey: SettingsKey.homeCatalogSyncedOrder)
+        }
+        if let data = try? JSONEncoder().encode(disabledKeys) {
+            defaults.set(data, forKey: SettingsKey.homeCatalogDisabled)
+        }
     }
 
     /// Replaces the profile's collections blob (`sync_push_collections`).
@@ -1261,6 +1326,38 @@ private struct RemoteProfile: Decodable {
         profileIndex = try container.decode(Int.self, forKey: .profileIndex)
         name = (try? container.decode(String.self, forKey: .name)) ?? ""
         avatarId = try? container.decodeIfPresent(String.self, forKey: .avatarId)
+    }
+}
+
+/// The account's Home catalog layout blob (`sync_pull_home_catalog_settings`).
+/// Parsed leniently from the RPC's `settings_json` so unknown fields and shape
+/// drift can't abort the pull.
+struct HomeCatalogSyncPayload {
+    let items: [HomeCatalogSyncItem]
+
+    init(dictionary: [String: Any]) {
+        let rawItems = dictionary["items"] as? [[String: Any]] ?? []
+        self.items = rawItems.compactMap(HomeCatalogSyncItem.init(dictionary:))
+    }
+}
+
+struct HomeCatalogSyncItem {
+    let addonId: String
+    let type: String
+    let catalogId: String
+    let enabled: Bool
+    let order: Int
+    let isCollection: Bool
+
+    init?(dictionary: [String: Any]) {
+        self.addonId = dictionary["addon_id"] as? String ?? ""
+        self.type = dictionary["type"] as? String ?? ""
+        self.catalogId = dictionary["catalog_id"] as? String ?? ""
+        self.enabled = dictionary["enabled"] as? Bool ?? true
+        self.order = (dictionary["order"] as? NSNumber)?.intValue ?? 0
+        self.isCollection = dictionary["is_collection"] as? Bool ?? false
+        // A non-collection item is only meaningful with an add-on catalog key.
+        if !isCollection && (addonId.isEmpty || catalogId.isEmpty) { return nil }
     }
 }
 

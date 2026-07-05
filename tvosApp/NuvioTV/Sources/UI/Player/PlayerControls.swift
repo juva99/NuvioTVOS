@@ -290,6 +290,109 @@ extension View {
 
 }
 
+// MARK: - Next episode card
+//
+// Netflix-style auto-play prompt shown near the end of an episode. Liquid Glass
+// card with the upcoming episode's thumbnail, a live countdown when auto-play is
+// armed, and a Play button that advances immediately.
+struct NextEpisodeOverlay: View {
+    let episode: NuvioVideo
+    /// Seconds left on the auto-play countdown; nil when the timer is off or was
+    /// cancelled by a fast-forward (manual Play only).
+    let countdown: Int?
+    let isAdvancing: Bool
+    var isFocused: Bool
+    let onPlay: () -> Void
+
+    private var episodeLine: String {
+        "S\(episode.season) E\(episode.episode) • \(episode.title)"
+    }
+
+    var body: some View {
+        HStack(spacing: 22) {
+            thumbnail
+
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Next Episode")
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.62))
+                Text(episodeLine)
+                    .font(.system(size: 29, weight: .bold))
+                    .foregroundColor(.white)
+                    .lineLimit(1)
+                if let countdown, !isAdvancing {
+                    Text("Playing in \(countdown)s")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                        .contentTransition(.numericText())
+                }
+            }
+
+            Spacer(minLength: 20)
+
+            playButton
+        }
+        .padding(18)
+        .frame(width: 780)
+        .glassRoundedRect(cornerRadius: 26)
+        .overlay(
+            RoundedRectangle(cornerRadius: 26, style: .continuous)
+                .strokeBorder(Color.white.opacity(isFocused ? 0.85 : 0.14), lineWidth: isFocused ? 3 : 1)
+        )
+        .shadow(color: .black.opacity(0.55), radius: 22, x: 0, y: 10)
+        .animation(.easeInOut(duration: 0.18), value: isFocused)
+        .animation(.easeInOut(duration: 0.2), value: countdown)
+    }
+
+    private var thumbnail: some View {
+        ZStack {
+            Color.white.opacity(0.06)
+            if let thumb = episode.thumbnail, let url = URL(string: thumb) {
+                AsyncImage(url: url) { image in
+                    image.resizable().aspectRatio(contentMode: .fill)
+                } placeholder: {
+                    Image(systemName: "play.rectangle")
+                        .font(.system(size: 30))
+                        .foregroundColor(.white.opacity(0.4))
+                }
+            } else {
+                Image(systemName: "play.rectangle")
+                    .font(.system(size: 30))
+                    .foregroundColor(.white.opacity(0.4))
+            }
+        }
+        .frame(width: 158, height: 90)
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+    }
+
+    private var playButton: some View {
+        HStack(spacing: 12) {
+            if isAdvancing {
+                ProgressView()
+                    .progressViewStyle(CircularProgressViewStyle(tint: isFocused ? .black : .white))
+                    .scaleEffect(0.9)
+                Text("Starting…")
+            } else {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 22, weight: .bold))
+                Text(countdown != nil ? "Play Now" : "Play")
+            }
+        }
+        .font(.system(size: 24, weight: .semibold))
+        .foregroundColor(isFocused ? .black : .white)
+        .padding(.horizontal, 30)
+        .padding(.vertical, 16)
+        .background {
+            if isFocused {
+                Capsule().fill(Color.white)
+            } else {
+                Capsule().fill(Color.white.opacity(0.14))
+                    .overlay(Capsule().strokeBorder(Color.white.opacity(0.4), lineWidth: 1))
+            }
+        }
+    }
+}
+
 private struct PlayerGlassCircleButtonBackground: ViewModifier {
     let filled: Bool
 
