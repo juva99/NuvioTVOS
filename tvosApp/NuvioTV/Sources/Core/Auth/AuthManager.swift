@@ -328,7 +328,7 @@ final class AuthManager: ObservableObject {
 
 /// Keychain-backed session persistence. The old UserDefaults key is migrated
 /// once so existing installs do not lose a session when upgrading.
-private struct SessionStore {
+struct SessionStore {
     private let legacySessionKey = "nuvio.auth.session"
     private let skipKey = "nuvio.auth.skippedLogin"
     private let keychainService = "com.nuvio.app.tv.auth"

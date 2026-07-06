@@ -56,6 +56,8 @@
 		C0D310290000000000000029 /* DiscoverViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D300290000000000000029 /* DiscoverViewModel.swift */; };
 		C0D3102A000000000000002A /* DiscoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3002A000000000000002A /* DiscoverView.swift */; };
 		C0D3102B000000000000002B /* NuvioSyncService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3002B000000000000002B /* NuvioSyncService.swift */; };
+		C0D3102C000000000000002C /* TraktAuthService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3002C000000000000002C /* TraktAuthService.swift */; };
+		C0D3102D000000000000002D /* IntroDBSkipService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3002D000000000000002D /* IntroDBSkipService.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -112,6 +114,8 @@
 		C0D300290000000000000029 /* DiscoverViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/ViewModels/DiscoverViewModel.swift; sourceTree = "<group>"; };
 		C0D3002A000000000000002A /* DiscoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/UI/Discover/DiscoverView.swift; sourceTree = "<group>"; };
 		C0D3002B000000000000002B /* NuvioSyncService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/Core/Sync/NuvioSyncService.swift; sourceTree = "<group>"; };
+		C0D3002C000000000000002C /* TraktAuthService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/Core/Trakt/TraktAuthService.swift; sourceTree = "<group>"; };
+		C0D3002D000000000000002D /* IntroDBSkipService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/Core/Skip/IntroDBSkipService.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -193,6 +197,8 @@
 				C0D300260000000000000026 /* QRCode.swift */,
 				C0D300270000000000000027 /* AuthManager.swift */,
 				C0D3002B000000000000002B /* NuvioSyncService.swift */,
+				C0D3002C000000000000002C /* TraktAuthService.swift */,
+				C0D3002D000000000000002D /* IntroDBSkipService.swift */,
 				C0D300280000000000000028 /* LoginView.swift */,
 				C0D300290000000000000029 /* DiscoverViewModel.swift */,
 				C0D3002A000000000000002A /* DiscoverView.swift */,
@@ -396,6 +402,8 @@
 				C0D310260000000000000026 /* QRCode.swift in Sources */,
 				C0D310270000000000000027 /* AuthManager.swift in Sources */,
 				C0D3102B000000000000002B /* NuvioSyncService.swift in Sources */,
+				C0D3102C000000000000002C /* TraktAuthService.swift in Sources */,
+				C0D3102D000000000000002D /* IntroDBSkipService.swift in Sources */,
 				C0D310280000000000000028 /* LoginView.swift in Sources */,
 				C0D310290000000000000029 /* DiscoverViewModel.swift in Sources */,
 				C0D3102A000000000000002A /* DiscoverView.swift in Sources */,

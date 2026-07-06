@@ -501,8 +501,8 @@ private struct CountdownText: View {
     }
 }
 
-private extension View {
-    /// Capsule chrome shared by the login card's buttons and tabs: Liquid
+extension View {
+    /// Capsule chrome shared by the login/profile buttons and tabs: Liquid
     /// Glass on tvOS 26+, translucent white fill on older versions.
     /// `highlighted` renders the solid-white selected/focused state (pair it
     /// with black text); `prominent` brightens the resting state for the

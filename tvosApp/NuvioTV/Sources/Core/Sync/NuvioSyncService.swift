@@ -37,6 +37,7 @@ final class NuvioSyncManager: ObservableObject {
     private var pushTask: Task<Void, Never>?
     private var profileBackfillTask: Task<Void, Never>?
     private var completedInitialPullKeys: Set<String> = []
+    private var observedActiveProfileId: String?
     private var isApplyingRemote = false
     private var didAttach = false
 
@@ -116,6 +117,7 @@ final class NuvioSyncManager: ObservableObject {
             pushTask?.cancel()
             profileBackfillTask?.cancel()
             completedInitialPullKeys.removeAll()
+            observedActiveProfileId = nil
             isPullingAccountProfiles = false
         case .loading:
             break
@@ -123,6 +125,9 @@ final class NuvioSyncManager: ObservableObject {
     }
 
     func activeProfileChanged(_ profile: Profile?) {
+        let profileId = profile?.id
+        guard profileId != observedActiveProfileId else { return }
+        observedActiveProfileId = profileId
         guard profile != nil, !isApplyingRemote else { return }
         schedulePull(force: true)
     }

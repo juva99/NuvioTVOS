@@ -25,17 +25,17 @@ The Apple TV build is published as a `.ipa` on the [Releases page](https://githu
 
 ## Latest tvOS Beta
 
-[Beta 2.3](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.3) is the current tvOS release. Download the unsigned IPA here:
+[Beta 2.4](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.4) is the current tvOS release. Download the unsigned IPA here:
 
-[NuvioTV-tvOS-beta-2.3.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.3/NuvioTV-tvOS-beta-2.3.ipa)
+[NuvioTV-tvOS-beta-2.4.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.4/NuvioTV-tvOS-beta-2.4.ipa)
 
-Beta 2.3 brings player automation and stream reliability:
+Beta 2.4 brings the fixes from the latest tvOS pass:
 
-- Up Next auto-play: a Liquid Glass card near the end of an episode plays the next one in place after a 10-second countdown, so you never leave the player. Fast-forward cancels the countdown; toggle it in Settings → Playback → Auto-Play Next Episode.
-- Streams load from all add-ons in parallel and appear as they respond, instead of waiting for every add-on.
-- Expired stream links recover automatically: the player re-resolves a fresh link for the same title/episode and resumes where you left off.
-- Finishing an episode rolls Continue Watching over to the next episode ("Next Up") instead of dropping the series.
-- Home catalog layout (order and hidden catalogs) now follows your account.
+- IntroDB skip intro and skip ending, including controller-aware hiding and focus fixes.
+- Repeat seeking with a configurable seek step, defaulting to 15 seconds.
+- Continue Watching keeps end-credit episodes and labels aired follow-ups as "New Episode".
+- Upcoming episodes can stay visible with their air date without becoming playable too early.
+- Trakt, avatar saving, Liquid Glass buttons, and subtitle preview polish are included in this build.
 
 ## About
 

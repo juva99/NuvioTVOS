@@ -140,6 +140,83 @@ struct NuvioVideo: Identifiable, Codable, Hashable {
     let rating: String?
 }
 
+enum EpisodeReleasePolicy {
+    static let showUnairedNextUpKey = "nuvio.tv.settings.layout.showUnairedNextUp"
+    static let upcomingNextSeasonWindowDays = 7
+
+    static var showUnairedNextUp: Bool {
+        if UserDefaults.standard.object(forKey: showUnairedNextUpKey) == nil {
+            return true
+        }
+        return UserDefaults.standard.bool(forKey: showUnairedNextUpKey)
+    }
+
+    static func hasAired(_ released: String?) -> Bool {
+        guard let releaseDay = isoDay(released) else { return true }
+        return releaseDay < todayIsoDay()
+    }
+
+    static func shouldSurfaceNextEpisode(
+        watchedSeason: Int?,
+        candidateSeason: Int?,
+        released: String?
+    ) -> Bool {
+        let isSeasonRollover = seasonSortKey(candidateSeason ?? 0) != seasonSortKey(watchedSeason ?? 0)
+        if !isSeasonRollover {
+            return showUnairedNextUp || hasAired(released)
+        }
+        if hasAired(released), isoDate(released) != nil {
+            return true
+        }
+        guard showUnairedNextUp,
+              let releaseDate = isoDate(released) else {
+            return false
+        }
+        let days = Calendar.current.dateComponents([.day], from: today(), to: releaseDate).day
+        return days.map { (0...upcomingNextSeasonWindowDays).contains($0) } ?? false
+    }
+
+    static func airDateText(for released: String?) -> String? {
+        guard let released, !hasAired(released) else { return nil }
+        return NuvioDateDisplay.formattedDate(released) ?? released.prefix(10).description
+    }
+
+    private static func isoDate(_ value: String?) -> Date? {
+        guard let day = isoDay(value) else { return nil }
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.date(from: day)
+    }
+
+    private static func isoDay(_ value: String?) -> String? {
+        guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines),
+              raw.count >= 10 else { return nil }
+        let day = String(raw.prefix(10))
+        guard day.split(separator: "-").count == 3 else { return nil }
+        return day
+    }
+
+    private static func todayIsoDay() -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone.current
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: Date())
+    }
+
+    private static func today() -> Date {
+        Calendar.current.startOfDay(for: Date())
+    }
+
+    private static func seasonSortKey(_ season: Int) -> Int {
+        season <= 0 ? Int.max : season
+    }
+}
+
 /// Video stream information
 struct NuvioSubtitle: Identifiable, Codable, Equatable {
     var id: String { url }
@@ -219,12 +296,21 @@ struct ContinueWatchingItem: Identifiable, Codable {
     /// saved before episode tracking existed — optionals keep old JSON decoding).
     let season: Int?
     let episode: Int?
+    let released: String?
     /// True when this entry is a fresh next-episode suggestion (the previous
     /// episode was finished) rather than real playback progress. Optional so
     /// old persisted JSON keeps decoding.
     let isUpNext: Bool?
 
     var isUpNextEntry: Bool { isUpNext == true }
+    var hasAired: Bool { EpisodeReleasePolicy.hasAired(released ?? episodeVideo?.released) }
+    var airDateText: String? { EpisodeReleasePolicy.airDateText(for: released ?? episodeVideo?.released) }
+    var upNextBadgeText: String {
+        guard isUpNextEntry else { return remainingText }
+        if hasAired { return "NEW EPISODE" }
+        if let airDateText { return "AIRS \(airDateText.uppercased())" }
+        return "UPCOMING"
+    }
 
     init(
         meta: NuvioMeta,
@@ -234,6 +320,7 @@ struct ContinueWatchingItem: Identifiable, Codable {
         lastWatchedAt: Date,
         season: Int? = nil,
         episode: Int? = nil,
+        released: String? = nil,
         isUpNext: Bool? = nil
     ) {
         self.meta = meta
@@ -243,6 +330,7 @@ struct ContinueWatchingItem: Identifiable, Codable {
         self.lastWatchedAt = lastWatchedAt
         self.season = season
         self.episode = episode
+        self.released = released
         self.isUpNext = isUpNext
     }
 
@@ -386,7 +474,24 @@ enum ContinueWatchingStore {
             duration: duration,
             lastWatchedAt: Date(),
             season: season ?? existing?.season,
-            episode: episode ?? existing?.episode
+            episode: episode ?? existing?.episode,
+            released: existing?.released
+        )
+        let updated = ([item] + items().filter { $0.meta.id != meta.id }).prefix(maxItems)
+        persist(Array(updated))
+    }
+
+    static func saveUpNext(meta: NuvioMeta, duration: Double, season: Int, episode: Int, released: String? = nil) {
+        let item = ContinueWatchingItem(
+            meta: meta,
+            streamUrl: "",
+            position: 1,
+            duration: max(duration, 120),
+            lastWatchedAt: Date(),
+            season: season,
+            episode: episode,
+            released: released,
+            isUpNext: true
         )
         let updated = ([item] + items().filter { $0.meta.id != meta.id }).prefix(maxItems)
         persist(Array(updated))

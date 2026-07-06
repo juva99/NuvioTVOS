@@ -16,9 +16,10 @@ struct PosterCard: View {
     var continueRemainingText: String? = nil
     var continueEpisodeText: String? = nil
     var continueEpisodeTitleText: String? = nil
-    /// Fresh next-episode suggestion: the badge reads "Next Up" and the
+    /// Fresh next-episode suggestion: the badge reads "New Episode" and the
     /// progress bar is hidden, since there's no real playback position yet.
     var continueIsUpNext: Bool = false
+    var continueUpNextBadgeText: String? = nil
     var showsWatchedBadge: Bool = true
     var shouldRequestInitialFocus: Bool = false
     var onInitialFocusRequested: (() -> Void)? = nil
@@ -224,7 +225,7 @@ struct PosterCard: View {
     }
 
     private var continueBadgeDisplayText: String? {
-        if continueIsUpNext { return "Next Up" }
+        if continueIsUpNext { return continueUpNextBadgeText ?? "New Episode" }
         guard let continueRemainingText else { return nil }
         if let continueEpisodeText {
             return "\(continueEpisodeText) • \(continueRemainingText)"

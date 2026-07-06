@@ -432,6 +432,8 @@ struct AddProfileView: View {
 /// avatar picker. Selecting an item stores its server id in `selectedAvatarId`.
 struct AvatarPickerGrid: View {
     @Binding var selectedAvatarId: String
+    var onSelectAvatar: ((String) -> Void)? = nil
+    var scrollsGrid = false
 
     @ObservedObject private var catalog = AvatarCatalogStore.shared
     @State private var selectedCategory = "all"
@@ -463,19 +465,36 @@ struct AvatarPickerGrid: View {
                     .padding(.vertical, 4)
                 }
 
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
-                    ForEach(catalog.items(in: selectedCategory)) { avatar in
-                        AvatarGridCell(
-                            avatar: avatar,
-                            isSelected: avatar.id == selectedAvatarId
-                        ) {
-                            selectedAvatarId = avatar.id
-                        }
-                    }
-                }
+                grid
             }
         }
         .onAppear { catalog.loadIfNeeded() }
+    }
+
+    @ViewBuilder
+    private var grid: some View {
+        if scrollsGrid {
+            ScrollView {
+                gridContent
+                    .padding(.vertical, 6)
+            }
+        } else {
+            gridContent
+        }
+    }
+
+    private var gridContent: some View {
+        LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
+            ForEach(catalog.items(in: selectedCategory)) { avatar in
+                AvatarGridCell(
+                    avatar: avatar,
+                    isSelected: avatar.id == selectedAvatarId
+                ) {
+                    selectedAvatarId = avatar.id
+                    onSelectAvatar?(avatar.id)
+                }
+            }
+        }
     }
 
     private func categoryLabel(_ category: String) -> String {
@@ -494,24 +513,16 @@ private struct AvatarCategoryTab: View {
         Button(action: action) {
             Text(label)
                 .font(.system(size: 18, weight: .semibold))
-                .foregroundColor(isSelected || isFocused ? .white : .white.opacity(0.6))
+                .foregroundColor(isSelected || isFocused ? .black : .white.opacity(0.68))
                 .padding(.horizontal, 20)
-                .padding(.vertical, 10)
-                .background(
-                    Capsule().fill(
-                        isFocused ? Color.white.opacity(0.22)
-                            : (isSelected ? Color.white.opacity(0.14) : Color.white.opacity(0.05))
-                    )
-                )
-                .overlay(
-                    Capsule().stroke(
-                        isSelected || isFocused ? Color.white.opacity(0.6) : Color.clear,
-                        lineWidth: 1.5
-                    )
-                )
+                .frame(height: 44)
+                .loginGlassCapsule(highlighted: isSelected || isFocused)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .scaleEffect(isFocused ? 1.05 : 1)
+        .animation(.easeOut(duration: 0.12), value: isFocused)
     }
 }
 
@@ -553,8 +564,9 @@ private struct AvatarGridCell: View {
             }
             .frame(width: 118)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PosterCardButtonStyle())
         .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
     }
 }
 
@@ -572,26 +584,83 @@ struct ProfileAvatarPickerSheet: View {
     }
 
     var body: some View {
-        NavigationView {
-            Form {
-                Section(header: Text(title)) {
-                    AvatarPickerGrid(selectedAvatarId: $selectedAvatarId)
+        ZStack {
+            ProfileBackground()
+                .ignoresSafeArea()
+
+            VStack(alignment: .leading, spacing: 28) {
+                HStack(alignment: .center, spacing: 24) {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Choose Avatar")
+                            .font(.system(size: 42, weight: .bold))
+                            .foregroundColor(.white)
+
+                        Text(title)
+                            .font(.system(size: 22, weight: .medium))
+                            .foregroundColor(.white.opacity(0.62))
+                    }
+
+                    Spacer()
+
+                    ProfileAvatarView(avatarId: selectedAvatarId, size: 112)
                 }
 
-                Button("Save") {
-                    onSave(selectedAvatarId)
-                    isPresented = false
-                }
-                .disabled(selectedAvatarId.isEmpty)
-            }
-            .navigationTitle("Choose Avatar")
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") {
+                AvatarPickerGrid(selectedAvatarId: $selectedAvatarId, scrollsGrid: true)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+
+                HStack(spacing: 16) {
+                    ProfileAvatarPickerButton(title: "Cancel", systemImage: "xmark") {
+                        isPresented = false
+                    }
+
+                    ProfileAvatarPickerButton(
+                        title: "Save",
+                        systemImage: "checkmark",
+                        prominent: true,
+                        disabled: selectedAvatarId.isEmpty
+                    ) {
+                        onSave(selectedAvatarId)
                         isPresented = false
                     }
                 }
             }
+            .padding(.horizontal, 84)
+            .padding(.vertical, 62)
+            .frame(maxWidth: 1180, maxHeight: .infinity)
         }
+    }
+}
+
+private struct ProfileAvatarPickerButton: View {
+    let title: String
+    let systemImage: String
+    var prominent: Bool = false
+    var disabled: Bool = false
+    let action: () -> Void
+
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        Button(action: action) {
+            Label(title, systemImage: systemImage)
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundColor(foreground)
+                .padding(.horizontal, 28)
+                .frame(height: 58)
+                .frame(minWidth: 190)
+                .loginGlassCapsule(highlighted: isFocused, prominent: prominent)
+                .opacity(disabled ? 0.5 : 1)
+                .scaleEffect(isFocused && !disabled ? 1.03 : 1)
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .disabled(disabled)
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .animation(.easeOut(duration: 0.12), value: isFocused)
+    }
+
+    private var foreground: Color {
+        if isFocused { return .black }
+        return prominent ? .black : .white
     }
 }

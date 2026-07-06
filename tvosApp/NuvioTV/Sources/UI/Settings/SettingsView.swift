@@ -76,10 +76,16 @@ enum SettingsKey {
     static let catalogAddonNames = "nuvio.tv.settings.layout.catalogAddonNames"
     static let discoverLocation = "nuvio.tv.settings.layout.discoverLocation"
     static let continueWatchingSort = "nuvio.tv.settings.layout.continueWatchingSort"
+    static let showUnairedNextUp = "nuvio.tv.settings.layout.showUnairedNextUp"
     static let hideUnreleased = "nuvio.tv.settings.layout.hideUnreleased"
     static let showFullDates = "nuvio.tv.settings.layout.showFullDates"
 
     static let traktConnected = "nuvio.tv.settings.integrations.traktConnected"
+    static let traktContinueWatchingDaysCap = "nuvio.tv.settings.integrations.traktContinueWatchingDaysCap"
+    static let traktShowMetaComments = "nuvio.tv.settings.integrations.traktShowMetaComments"
+    static let traktWatchProgressSource = "nuvio.tv.settings.integrations.traktWatchProgressSource"
+    static let traktLibrarySourceMode = "nuvio.tv.settings.integrations.traktLibrarySourceMode"
+    static let traktMoreLikeThisSource = "nuvio.tv.settings.integrations.traktMoreLikeThisSource"
     static let tmdbEnabled = "nuvio.tv.settings.integrations.tmdbEnabled"
     static let tmdbApiKey = "nuvio.tv.settings.integrations.tmdbApiKey"
     static let mdbListEnabled = "nuvio.tv.settings.integrations.mdbListEnabled"
@@ -116,8 +122,10 @@ enum SettingsKey {
         profileName, profilePinEnabled, profileAutoSelectLast, accountSyncWatchState,
         theme, bodyColor, font, language, amoled, amoledSurfaces, reduceMotion,
         homeLayout, heroEnabled, posterLabels, catalogAddonNames, discoverLocation,
-        continueWatchingSort, hideUnreleased, showFullDates,
-        traktConnected, tmdbEnabled, tmdbApiKey, mdbListEnabled, mdbListApiKey,
+        continueWatchingSort, showUnairedNextUp, hideUnreleased, showFullDates,
+        traktConnected, traktContinueWatchingDaysCap, traktShowMetaComments,
+        traktWatchProgressSource, traktLibrarySourceMode, traktMoreLikeThisSource,
+        tmdbEnabled, tmdbApiKey, mdbListEnabled, mdbListApiKey,
         debridProvider, debridApiKey, streamAddonManifestURL, streamAddonManifestURLs,
         playerEngine, externalPlayer, smartStreamSelection, smartStreamQuality, smartSubtitleMatching,
         autoPlayNext, trailersEnabled, trailerDelay, audioLanguage,
@@ -495,7 +503,10 @@ struct SettingsView: View {
                         }
                         .padding(.leading, 44)
                         .padding(.trailing, 72)
-                        .padding(.vertical, 56)
+                        // No bottom padding: the scrolling controls run all the way
+                        // to the screen edge (the preview above stays pinned), so the
+                        // list isn't cut short with dead space below it.
+                        .padding(.top, 56)
                     } else {
                         ScrollView {
                             VStack(alignment: .leading, spacing: 28) {
@@ -890,6 +901,7 @@ private struct LayoutDiscoverySettingsView: View {
     @AppStorage(SettingsKey.catalogAddonNames) private var catalogAddonNames = true
     @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
     @AppStorage(SettingsKey.continueWatchingSort) private var continueWatchingSort = "Default"
+    @AppStorage(SettingsKey.showUnairedNextUp) private var showUnairedNextUp = true
     @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
     @AppStorage(SettingsKey.showFullDates) private var showFullDates = true
 
@@ -953,6 +965,13 @@ private struct LayoutDiscoverySettingsView: View {
                 )
 
                 SettingsToggleRow(
+                    title: "Show Unaired Next Up",
+                    subtitle: "Keep upcoming episodes in Continue Watching with their air date",
+                    isOn: $showUnairedNextUp,
+                    accentColor: accentColor
+                )
+
+                SettingsToggleRow(
                     title: "Hide Unreleased Content",
                     subtitle: "Filter titles before their known release date",
                     isOn: $hideUnreleased,
@@ -973,7 +992,7 @@ private struct LayoutDiscoverySettingsView: View {
 private struct IntegrationSettingsView: View {
     let accentColor: Color
 
-    @AppStorage(SettingsKey.traktConnected) private var traktConnected = false
+    @StateObject private var traktViewModel = TraktSettingsViewModel()
     @AppStorage(SettingsKey.tmdbEnabled) private var tmdbEnabled = false
     @AppStorage(SettingsKey.tmdbApiKey) private var tmdbApiKey = ""
     @AppStorage(SettingsKey.mdbListEnabled) private var mdbListEnabled = false
@@ -987,13 +1006,8 @@ private struct IntegrationSettingsView: View {
         VStack(alignment: .leading, spacing: 22) {
             AddonsSettingsSection(accentColor: accentColor)
 
-            SettingsGroup(title: "Watch Sync", subtitle: "Connection flags for watch history services") {
-                SettingsToggleRow(
-                    title: "Trakt",
-                    subtitle: traktConnected ? "Connected locally for sync-enabled screens" : "Ready for device-code sign-in when auth is wired",
-                    isOn: $traktConnected,
-                    accentColor: accentColor
-                )
+            SettingsGroup(title: "Trakt", subtitle: "Watchlist, progress, history, comments, and recommendations") {
+                TraktConnectionSettingsCard(viewModel: traktViewModel, accentColor: accentColor)
             }
 
             SettingsGroup(title: "Metadata Providers", subtitle: "Optional API keys for richer metadata and rating badges") {
@@ -1048,6 +1062,253 @@ private struct IntegrationSettingsView: View {
                 .disabled(debridProvider == "None")
             }
         }
+        .onAppear { traktViewModel.reload() }
+        .task { traktViewModel.fetchAccountConnection(auto: true) }
+    }
+}
+
+private struct TraktConnectionSettingsCard: View {
+    @ObservedObject var viewModel: TraktSettingsViewModel
+    let accentColor: Color
+
+    private var activationURL: String {
+        if let code = viewModel.deviceUserCode, !code.isEmpty {
+            return "https://trakt.tv/activate/\(code)"
+        }
+        return viewModel.verificationURL ?? "https://trakt.tv/activate"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 18) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color(red: 0.94, green: 0.10, blue: 0.17))
+                    Text("trakt")
+                        .font(.system(size: 24, weight: .black))
+                        .foregroundColor(.white)
+                }
+                .frame(width: 92, height: 62)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(statusTitle)
+                        .font(.system(size: 24, weight: .bold))
+                        .foregroundColor(.white)
+
+                    Text(statusSubtitle)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.white.opacity(0.62))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+
+                Spacer(minLength: 16)
+            }
+
+            switch viewModel.mode {
+            case .disconnected:
+                disconnectedBody
+            case .awaitingApproval:
+                awaitingApprovalBody
+            case .connected:
+                connectedBody
+            }
+
+            if let message = viewModel.statusMessage, !message.isEmpty {
+                Text(message)
+                    .font(.system(size: 17, weight: .medium))
+                    .foregroundColor(.white.opacity(0.62))
+            }
+
+            if let error = viewModel.errorMessage, !error.isEmpty {
+                Text(error)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(Color(red: 1.0, green: 0.43, blue: 0.43))
+            }
+        }
+    }
+
+    private var disconnectedBody: some View {
+        VStack(spacing: 12) {
+            SettingsActionRow(
+                title: "Fetch Trakt Connection",
+                subtitle: viewModel.credentialsConfigured
+                    ? "Check your Nuvio account for an existing Trakt login"
+                    : "Nuvio Trakt proxy is not configured",
+                value: viewModel.isLoading ? "Checking..." : "Fetch",
+                accentColor: accentColor
+            ) {
+                viewModel.fetchAccountConnection()
+            }
+
+            SettingsActionRow(
+                title: "Start Trakt Login",
+                subtitle: "Use a Trakt activation code on this Apple TV",
+                value: viewModel.isLoading ? "Starting..." : "Connect",
+                accentColor: accentColor
+            ) {
+                viewModel.connect()
+            }
+        }
+    }
+
+    private var awaitingApprovalBody: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .center, spacing: 24) {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Go to trakt.tv/activate and enter:")
+                        .font(.system(size: 19, weight: .medium))
+                        .foregroundColor(.white.opacity(0.68))
+
+                    Text(viewModel.deviceUserCode ?? "-")
+                        .font(.system(size: 42, weight: .black))
+                        .tracking(4)
+                        .foregroundColor(accentColor)
+
+                    Text(activationURL)
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.54))
+                        .lineLimit(1)
+                }
+
+                Spacer(minLength: 16)
+
+                if let image = QRCode.image(from: activationURL, scale: 8) {
+                    Image(uiImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 144, height: 144)
+                        .padding(10)
+                        .background(Color.white, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+            }
+
+            HStack(spacing: 12) {
+                SettingsActionRow(
+                    title: "Retry Polling",
+                    subtitle: "Ask Trakt again after approving the code",
+                    value: viewModel.isPolling ? "Waiting" : "Retry",
+                    accentColor: accentColor
+                ) {
+                    viewModel.retryPolling()
+                }
+
+                SettingsActionRow(
+                    title: "Cancel",
+                    subtitle: "Clear this device-code login attempt",
+                    value: "Cancel",
+                    accentColor: accentColor
+                ) {
+                    viewModel.cancelDeviceFlow()
+                }
+            }
+        }
+    }
+
+    private var connectedBody: some View {
+        VStack(spacing: 12) {
+            HStack(spacing: 12) {
+                SettingsInfoRow(title: "Movies", value: statValue(viewModel.connectedStats?.moviesWatched))
+                SettingsInfoRow(title: "Shows", value: statValue(viewModel.connectedStats?.showsWatched))
+            }
+
+            HStack(spacing: 12) {
+                SettingsInfoRow(title: "Episodes", value: statValue(viewModel.connectedStats?.episodesWatched))
+                SettingsInfoRow(title: "Hours", value: viewModel.connectedStats?.totalWatchedHours.map { "\($0)h" } ?? "-")
+            }
+
+            SettingsActionRow(
+                title: "Sync Now",
+                subtitle: "Refresh Trakt user info and cached stats",
+                value: viewModel.isLoading ? "Syncing" : "Refresh",
+                accentColor: accentColor
+            ) {
+                viewModel.refreshNow()
+            }
+
+            SettingsActionRow(
+                title: "Library Source",
+                subtitle: "Choose where saved library items should come from",
+                value: viewModel.librarySourceMode.label,
+                accentColor: accentColor
+            ) {
+                viewModel.cycleLibrarySource()
+            }
+
+            SettingsActionRow(
+                title: "Watch Progress",
+                subtitle: "Choose the source for Resume and Continue Watching",
+                value: viewModel.watchProgressSource.label,
+                accentColor: accentColor
+            ) {
+                viewModel.cycleWatchProgressSource()
+            }
+
+            SettingsActionRow(
+                title: "Continue Watching Window",
+                subtitle: "Trakt history considered for Continue Watching",
+                value: continueWatchingLabel,
+                accentColor: accentColor
+            ) {
+                viewModel.cycleContinueWatchingDaysCap()
+            }
+
+            SettingsActionRow(
+                title: "Comments",
+                subtitle: "Show Trakt reviews on metadata screens",
+                value: viewModel.showMetaComments ? "On" : "Off",
+                accentColor: accentColor
+            ) {
+                viewModel.toggleComments()
+            }
+
+            SettingsActionRow(
+                title: "More Like This",
+                subtitle: "Recommendation source for related titles",
+                value: viewModel.moreLikeThisSource.label,
+                accentColor: accentColor
+            ) {
+                viewModel.cycleMoreLikeThisSource()
+            }
+
+            SettingsActionRow(
+                title: "Disconnect",
+                subtitle: "Remove this profile's Trakt tokens from this Apple TV",
+                value: "Disconnect",
+                accentColor: accentColor
+            ) {
+                viewModel.disconnect()
+            }
+        }
+    }
+
+    private var statusTitle: String {
+        switch viewModel.mode {
+        case .disconnected: return "Not connected"
+        case .awaitingApproval: return "Waiting for approval"
+        case .connected:
+            return "Connected as \(viewModel.username?.isEmpty == false ? viewModel.username! : "Trakt User")"
+        }
+    }
+
+    private var statusSubtitle: String {
+        switch viewModel.mode {
+        case .disconnected:
+            return "Connect Trakt to enable account-level watchlist, progress, comments, and recommendations."
+        case .awaitingApproval:
+            return "Approve this Apple TV in Trakt, then Nuvio will save the token for the active profile."
+        case .connected:
+            return "This profile can use Trakt-backed sync and metadata settings."
+        }
+    }
+
+    private var continueWatchingLabel: String {
+        viewModel.continueWatchingDaysCap == TraktDefaults.continueWatchingDaysCapAll
+            ? "All history"
+            : "\(viewModel.continueWatchingDaysCap) days"
+    }
+
+    private func statValue(_ value: Int?) -> String {
+        value.map(String.init) ?? (viewModel.isStatsLoading ? "..." : "-")
     }
 }
 
@@ -1265,7 +1526,10 @@ struct SubtitleStyleEditor: View {
 
             ScrollView {
                 controls
-                    .padding(.bottom, 32)
+                    // Generous trailing room so the last rows can scroll clear of
+                    // the scroll view's bottom clip edge — without it, focusing the
+                    // final stepper leaves its +/- controls sliced off the bottom.
+                    .padding(.bottom, 140)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .focusSection()
@@ -1426,7 +1690,11 @@ private struct SubtitlePreviewCard: View {
     }
 
     var body: some View {
-        ZStack(alignment: .bottom) {
+        // Decorative backdrop only. The 320pt Circle's intrinsic size was warping
+        // where `ZStack(.bottom)` placed the caption, dropping it below the card's
+        // clipped 220pt bottom. Keeping the caption as a bottom *overlay* pins it to
+        // the real 220pt frame instead, so its bottom padding is honored.
+        ZStack {
             LinearGradient(
                 colors: [
                     Color(red: 0.12, green: 0.14, blue: 0.24),
@@ -1442,17 +1710,15 @@ private struct SubtitlePreviewCard: View {
                 .frame(width: 320, height: 320)
                 .blur(radius: 60)
                 .offset(x: -180, y: -70)
-
-            VStack {
-                Spacer()
-                styledSubtitle
-                    .padding(.horizontal, previewHorizontalPadding)
-                    .padding(.bottom, previewBottomPadding)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .frame(height: 220)
         .frame(maxWidth: .infinity)
+        .overlay(alignment: .bottom) {
+            styledSubtitle
+                .frame(maxWidth: .infinity)
+                .padding(.horizontal, previewHorizontalPadding)
+                .padding(.bottom, previewBottomPadding)
+        }
         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 28, style: .continuous)

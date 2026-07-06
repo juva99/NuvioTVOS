@@ -327,8 +327,8 @@ struct ContentView: View {
                     activeScreen = .profileSelection
                 }
             },
-            onChangeProfileAvatar: { avatarId in
-                profileViewModel.updateActiveProfileAvatar(avatarId)
+            onChangeProfileAvatar: { profileId, avatarId in
+                profileViewModel.updateProfileAvatar(id: profileId, avatarId: avatarId)
             },
             onSignIn: {
                 authManager.requireLogin()
@@ -699,7 +699,7 @@ private struct TVMainTabView: View {
     let accountEmail: String?
     let isAuthenticated: Bool
     let onSwitchProfile: () -> Void
-    let onChangeProfileAvatar: (String) -> Void
+    let onChangeProfileAvatar: (String, String) -> Void
     let onSignIn: () -> Void
     let onSignOut: () -> Void
     let onNavigateToDetails: (String, String) -> Void
@@ -895,7 +895,7 @@ private struct TVSidebarAvatar: View {
 private struct TVProfileTabView: View {
     let profile: Profile?
     let onSwitchProfile: () -> Void
-    let onChangeAvatar: (String) -> Void
+    let onChangeAvatar: (String, String) -> Void
 
     @AppStorage(SettingsKey.profileName) private var settingsProfileName = "Nuvio User"
     @State private var showingAvatarPicker = false
@@ -949,7 +949,8 @@ private struct TVProfileTabView: View {
                 title: displayName,
                 selectedAvatarId: profile?.avatarId ?? ProfileAvatarCatalog.defaultId
             ) { avatarId in
-                onChangeAvatar(avatarId)
+                guard let profileId = profile?.id else { return }
+                onChangeAvatar(profileId, avatarId)
             }
         }
     }
@@ -985,19 +986,18 @@ private struct TVProfileActionButton: View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
                 .font(.system(size: 24, weight: .semibold))
-                .foregroundColor(.white)
+                .foregroundColor(isFocused ? .black : .white)
                 .lineLimit(1)
                 .padding(.horizontal, 34)
                 .padding(.vertical, 18)
                 .frame(minWidth: 230)
-                .background(
-                    Capsule().fill(isFocused ? Color.white.opacity(0.22) : Color.white.opacity(0.10))
-                )
-                .overlay(
-                    Capsule().strokeBorder(isFocused ? Color.white : Color.white.opacity(0.25), lineWidth: isFocused ? 3 : 1)
-                )
+                .loginGlassCapsule(highlighted: isFocused)
+                .contentShape(Capsule())
+                .scaleEffect(isFocused ? 1.03 : 1)
         }
-        .buttonStyle(.plain)
+        .buttonStyle(PosterCardButtonStyle())
+        .focusEffectDisabledIfAvailable()
+        .animation(.easeOut(duration: 0.12), value: isFocused)
     }
 }
 
@@ -1222,7 +1222,10 @@ struct TVHomeView: View {
                     .defaultFocusIfAvailable($focusedCardID, shouldRestoreHomeFocus ? store.lastFocusedCardID : nil)
                 }
             }
-            .ignoresSafeArea(.container, edges: .top)
+            // Ignore the bottom safe-area inset too, so the scrolling rows window
+            // runs to the screen's bottom edge instead of stopping short and
+            // leaving a black bar below the lowest visible row.
+            .ignoresSafeArea(.container, edges: [.top, .bottom])
         }
         .task {
             await load()
@@ -1764,7 +1767,7 @@ private struct TVHeroView: View {
             TVHeroMetaLine(meta: meta, episodeLine: episodeLine)
 
             if let continueItem {
-                Text(continueItem.isUpNextEntry ? "NEXT UP" : continueItem.remainingText.uppercased())
+                Text(continueItem.isUpNextEntry ? continueItem.upNextBadgeText : continueItem.remainingText.uppercased())
                     .font(.custom("Inter-SemiBold", size: 22))
                     .foregroundColor(.white.opacity(0.66))
             }
@@ -1953,6 +1956,7 @@ private struct TVCatalogRow: View {
                         continueEpisodeText: progressItem?.episodeLabel,
                         continueEpisodeTitleText: progressItem?.episodeVideo?.title,
                         continueIsUpNext: progressItem?.isUpNextEntry == true,
+                        continueUpNextBadgeText: progressItem?.upNextBadgeText,
                         showsWatchedBadge: id != TVHomeSection.continueWatchingId,
                         shouldRequestInitialFocus: shouldRequestInitialFocus,
                         onInitialFocusRequested: shouldRequestInitialFocus ? onInitialFocusRequested : nil,

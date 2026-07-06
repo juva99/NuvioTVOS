@@ -25,6 +25,7 @@ struct PlayerView: View {
     @State private var didHandleFinished = false
     @FocusState private var remoteInputFocused: Bool
     @FocusState private var nextEpisodeFocused: Bool
+    @FocusState private var skipSegmentFocused: Bool
 
     var body: some View {
         ZStack {
@@ -33,6 +34,15 @@ struct PlayerView: View {
             // libmpv renders into the Metal layer owned by this controller.
             MPVVideoSurface(controller: viewModel.playerController)
                 .ignoresSafeArea()
+
+            RemoteSeekPressCatcher(
+                isEnabled: { !viewModel.showControls && !viewModel.showSettingsPanel },
+                onBeginBackward: { viewModel.beginRepeatingSkipBackward() },
+                onBeginForward: { viewModel.beginRepeatingSkipForward() },
+                onEnd: { viewModel.stopRepeatingSkip() }
+            )
+            .frame(width: 1, height: 1)
+            .accessibilityHidden(true)
 
             switch viewModel.status {
             case .buffering, .idle:
@@ -79,10 +89,27 @@ struct PlayerView: View {
             Color.clear
                 .ignoresSafeArea()
                 .contentShape(Rectangle())
-                .focusable(!viewModel.showControls && !viewModel.showNextEpisodeCard)
+                .focusable(!viewModel.showControls && !viewModel.showNextEpisodeCard && !viewModel.showSkipSegmentCard)
                 .focused($remoteInputFocused)
                 .onTapGesture { viewModel.revealControls() }
                 .accessibilityHidden(true)
+
+            if viewModel.showSkipSegmentCard, let interval = viewModel.activeSkipInterval {
+                SkipSegmentOverlay(
+                    interval: interval,
+                    countdown: viewModel.skipSegmentCountdown,
+                    isFocused: skipSegmentFocused,
+                    onSkip: { viewModel.skipActiveInterval() }
+                )
+                .onTapGesture { viewModel.skipActiveInterval() }
+                .focusable(true)
+                .focused($skipSegmentFocused)
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(.leading, 60)
+                .padding(.bottom, viewModel.showControls ? 200 : 54)
+                .transition(.move(edge: .bottom).combined(with: .opacity))
+                .zIndex(3)
+            }
 
             // Netflix-style next-episode prompt, shown near the end. Visible even
             // when the transport controls are up (raised above them); focusable
@@ -93,10 +120,10 @@ struct PlayerView: View {
                     episode: next,
                     countdown: viewModel.nextEpisodeCountdown,
                     isAdvancing: viewModel.isAdvancingEpisode,
-                    isFocused: nextEpisodeFocused && !viewModel.showControls,
+                    isFocused: nextEpisodeFocused,
                     onPlay: { viewModel.playNextEpisode() }
                 )
-                .focusable(!viewModel.showControls)
+                .focusable(true)
                 .focused($nextEpisodeFocused)
                 .onTapGesture { viewModel.playNextEpisode() }
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomTrailing)
@@ -112,7 +139,13 @@ struct PlayerView: View {
             // animate. Animating opacity/scale on a mounted view sidesteps that —
             // focusability is gated inside PlayerControls so focus still hands off
             // cleanly to the remote-input overlay when hidden.
-            PlayerControls(viewModel: viewModel)
+            PlayerControls(
+                viewModel: viewModel,
+                isSkipSegmentFocused: skipSegmentFocused,
+                isNextEpisodeFocused: nextEpisodeFocused,
+                onFocusSkipSegment: { focusSkipSegment() },
+                onFocusNextEpisode: { focusNextEpisode() }
+            )
                 .opacity(viewModel.showControls && !viewModel.showSettingsPanel ? 1 : 0)
                 .scaleEffect(viewModel.showControls ? 1 : 0.95)
                 .allowsHitTesting(viewModel.showControls && !viewModel.showSettingsPanel)
@@ -130,6 +163,7 @@ struct PlayerView: View {
         }
         .animation(.playerControls, value: viewModel.showSettingsPanel)
         .animation(.playerControls, value: viewModel.showNextEpisodeCard)
+        .animation(.playerControls, value: viewModel.showSkipSegmentCard)
         .onAppear {
             UIApplication.shared.isIdleTimerDisabled = true
             viewModel.load(url: url, meta: meta, subtitle: subtitle, externalSubtitles: externalSubtitles, resumeFrom: resumeFrom)
@@ -160,8 +194,12 @@ struct PlayerView: View {
         .onChange(of: viewModel.showControls) { isVisible in
             if isVisible {
                 remoteInputFocused = false
+                nextEpisodeFocused = false
+                skipSegmentFocused = false
             } else if viewModel.showNextEpisodeCard {
                 focusNextEpisode()
+            } else if viewModel.showSkipSegmentCard {
+                focusSkipSegment()
             } else {
                 focusRemoteInput()
             }
@@ -170,7 +208,18 @@ struct PlayerView: View {
             guard !viewModel.showControls else { return }
             if visible {
                 focusNextEpisode()
+            } else if viewModel.showSkipSegmentCard {
+                focusSkipSegment()
             } else {
+                focusRemoteInput()
+            }
+        }
+        .onChange(of: viewModel.showSkipSegmentCard) { visible in
+            guard !viewModel.showControls, !viewModel.showNextEpisodeCard else { return }
+            if visible {
+                focusSkipSegment()
+            } else {
+                skipSegmentFocused = false
                 focusRemoteInput()
             }
         }
@@ -211,6 +260,12 @@ struct PlayerView: View {
             nextEpisodeFocused = true
         }
     }
+
+    private func focusSkipSegment() {
+        DispatchQueue.main.async {
+            skipSegmentFocused = true
+        }
+    }
 }
 
 // Hosts the libmpv UIViewController (owns the CAMetalLayer surface).
@@ -222,4 +277,95 @@ struct MPVVideoSurface: UIViewControllerRepresentable {
     }
 
     func updateUIViewController(_ uiViewController: MPVPlayerViewController, context: Context) {}
+}
+
+private struct RemoteSeekPressCatcher: UIViewControllerRepresentable {
+    let isEnabled: () -> Bool
+    let onBeginBackward: () -> Void
+    let onBeginForward: () -> Void
+    let onEnd: () -> Void
+
+    func makeUIViewController(context: Context) -> RemoteSeekPressViewController {
+        let controller = RemoteSeekPressViewController()
+        controller.isEnabled = isEnabled
+        controller.onBeginBackward = onBeginBackward
+        controller.onBeginForward = onBeginForward
+        controller.onEnd = onEnd
+        return controller
+    }
+
+    func updateUIViewController(_ controller: RemoteSeekPressViewController, context: Context) {
+        controller.isEnabled = isEnabled
+        controller.onBeginBackward = onBeginBackward
+        controller.onBeginForward = onBeginForward
+        controller.onEnd = onEnd
+        controller.view.setNeedsFocusUpdate()
+    }
+}
+
+private final class RemoteSeekPressViewController: UIViewController {
+    enum Direction {
+        case backward
+        case forward
+    }
+
+    var isEnabled: () -> Bool = { false }
+    var onBeginBackward: () -> Void = {}
+    var onBeginForward: () -> Void = {}
+    var onEnd: () -> Void = {}
+
+    private var activeDirection: Direction?
+
+    override var canBecomeFirstResponder: Bool { true }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+    }
+
+    override func didMove(toParent parent: UIViewController?) {
+        super.didMove(toParent: parent)
+        if parent != nil {
+            becomeFirstResponder()
+        }
+    }
+
+    override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        guard activeDirection == nil,
+              isEnabled(),
+              let direction = seekDirection(in: presses) else {
+            super.pressesBegan(presses, with: event)
+            return
+        }
+
+        activeDirection = direction
+        switch direction {
+        case .backward: onBeginBackward()
+        case .forward: onBeginForward()
+        }
+    }
+
+    override func pressesEnded(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if activeDirection != nil, seekDirection(in: presses) != nil {
+            activeDirection = nil
+            onEnd()
+        } else {
+            super.pressesEnded(presses, with: event)
+        }
+    }
+
+    override func pressesCancelled(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
+        if activeDirection != nil {
+            activeDirection = nil
+            onEnd()
+        } else {
+            super.pressesCancelled(presses, with: event)
+        }
+    }
+
+    private func seekDirection(in presses: Set<UIPress>) -> Direction? {
+        if presses.contains(where: { $0.type == .leftArrow }) { return .backward }
+        if presses.contains(where: { $0.type == .rightArrow }) { return .forward }
+        return nil
+    }
 }

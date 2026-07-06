@@ -1046,6 +1046,7 @@ struct TvDetailsContent: View {
                                     isWatched: uiState.isWatched,
                                     playTitle: playTarget.label,
                                     onPlayClick: {
+                                        guard playTarget.isPlayable else { return }
                                         // Series: play the resume/next-up episode; movies
                                         // fall through to the stream picker.
                                         if let episode = playTarget.episode {
@@ -1135,18 +1136,22 @@ struct TvDetailsContent: View {
     /// Primary-button target: resume the in-progress episode, advance to the
     /// next one after a finished episode, or start from the first playable one.
     /// Movies have no episode; the label alone flips between Play and Resume.
-    private func playTarget(for meta: NuvioMeta, episodes: [NuvioVideo]) -> (episode: NuvioVideo?, label: String) {
+    private func playTarget(for meta: NuvioMeta, episodes: [NuvioVideo]) -> (episode: NuvioVideo?, label: String, isPlayable: Bool) {
         let continueItem = ContinueWatchingStore.item(for: meta.id)
 
         guard !episodes.isEmpty else {
-            return (nil, continueItem == nil ? "Play" : "Resume")
+            return (nil, continueItem == nil ? "Play" : "Resume", true)
         }
 
         if let continueItem,
            let numbers = continueItem.episodeNumbers,
            let target = episodes.first(where: { $0.season == numbers.season && $0.episode == numbers.episode }) {
+            if continueItem.isUpNextEntry, !continueItem.hasAired {
+                let label = continueItem.airDateText.map { "Airs \($0)" } ?? "Upcoming"
+                return (target, label, false)
+            }
             let verb = continueItem.isUpNextEntry ? "Next" : "Resume"
-            return (target, "\(verb) S\(target.season) E\(target.episode)")
+            return (target, "\(verb) S\(target.season) E\(target.episode)", true)
         }
 
         // No progress entry (e.g. the episode just finished): continue with the
@@ -1154,11 +1159,11 @@ struct TvDetailsContent: View {
         let watched = WatchedStore.watchedEpisodeKeys(metaId: meta.id)
         if !watched.isEmpty,
            let next = episodes.first(where: { $0.season > 0 && !watched.contains("\($0.season):\($0.episode)") }) {
-            return (next, "Next S\(next.season) E\(next.episode)")
+            return (next, "Next S\(next.season) E\(next.episode)", true)
         }
 
         let first = firstPlayableEpisode(episodes)
-        return (first, first.map { "Play S\($0.season) E\($0.episode)" } ?? "Play")
+        return (first, first.map { "Play S\($0.season) E\($0.episode)" } ?? "Play", true)
     }
 
     private func seasonSortKey(_ season: Int) -> Int {

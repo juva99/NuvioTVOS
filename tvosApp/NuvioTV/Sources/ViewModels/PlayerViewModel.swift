@@ -24,6 +24,7 @@ class PlayerViewModel: ObservableObject {
     @Published var subtitles: [SubtitleTrack] = []
     @Published var audioTracks: [AudioTrack] = []
     @Published var playbackSpeed: PlaybackSpeed = .normal
+    @Published var seekStepSeconds: Int = PlayerSeekSettings.current
     @Published var qualities: [QualityOption] = [.auto]
     @Published var currentQuality: QualityOption = .auto
     @Published var showControls: Bool = true
@@ -56,6 +57,15 @@ class PlayerViewModel: ObservableObject {
     /// True while the next episode's stream is being resolved and loaded, so the
     /// card can show a spinner instead of a Play button.
     @Published var isAdvancingEpisode: Bool = false
+    /// Current IntroDB skip segment, visible as a compact skip action.
+    @Published var activeSkipInterval: SkipInterval?
+    @Published var skipSegmentCountdown: Int?
+
+    var showSkipSegmentCard: Bool {
+        guard activeSkipInterval != nil, !showSettingsPanel else { return false }
+        if activeSkipInterval?.id == autoHiddenSkipIntervalId, !showControls { return false }
+        return showControls || skipSegmentCountdown != nil
+    }
 
     /// Ordered episode list for the current series (empty for movies/trailers).
     private var seriesEpisodes: [NuvioVideo] = []
@@ -105,6 +115,13 @@ class PlayerViewModel: ObservableObject {
     private var didApplySubtitlePreference = false
     private var lastProgressSave = Date.distantPast
     private var controlsAutoHideSuspended = false
+    private var skipIntervals: [SkipInterval] = []
+    private var autoHiddenSkipIntervalId: String?
+    private var skipSegmentAutoHideDeadline: Date?
+    private var skipIntervalLoadTask: Task<Void, Never>?
+    private static let skipSegmentAutoHideSeconds = 5
+    private var seekRepeatTimer: Timer?
+    private static let seekRepeatInterval: TimeInterval = 0.28
 
     /// Best estimate of the real title's length, captured at load time from the
     /// existing Continue Watching entry (most reliable) or the metadata runtime.
@@ -218,10 +235,17 @@ class PlayerViewModel: ObservableObject {
         self.subtitleDelayMs = 0
         self.audioDelayMs = 0
         self.audioAmplificationDb = 0
+        self.skipIntervals = []
+        self.activeSkipInterval = nil
+        self.skipSegmentCountdown = nil
+        self.autoHiddenSkipIntervalId = nil
+        self.skipSegmentAutoHideDeadline = nil
+        self.skipIntervalLoadTask?.cancel()
         self.didApplySavedAudioSelection = savedSelection?.audio == nil
         self.didApplySavedSubtitleSelection = savedSelection?.subtitle == nil
         self.didApplyAudioPreference = false
         self.didApplySubtitlePreference = false
+        loadSkipIntervalsIfNeeded(meta: meta, isTrailerPlayback: isTrailerPlayback)
     }
 
     // MARK: - Next-episode auto-play
@@ -249,7 +273,17 @@ class PlayerViewModel: ObservableObject {
     private static func nextEpisode(after current: NuvioVideo?, in episodes: [NuvioVideo]) -> NuvioVideo? {
         guard let current, let index = episodes.firstIndex(where: { $0.id == current.id }) else { return nil }
         let following = episodes.index(after: index)
-        return following < episodes.endIndex ? episodes[following] : nil
+        guard following < episodes.endIndex else { return nil }
+        return episodes
+            .suffix(from: following)
+            .first { episode in
+                episode.season > 0 &&
+                EpisodeReleasePolicy.shouldSurfaceNextEpisode(
+                    watchedSeason: current.season,
+                    candidateSeason: episode.season,
+                    released: episode.released
+                )
+            }
     }
 
     /// Re-evaluated on every poll tick: shows the card near the end and runs the
@@ -275,7 +309,7 @@ class PlayerViewModel: ObservableObject {
         }
 
         showNextEpisodeCard = true
-        guard autoPlayNextEnabled, !autoAdvanceDisabled else {
+        guard autoPlayNextEnabled, !autoAdvanceDisabled, nextEpisodeIsPlayable else {
             nextEpisodeCountdown = nil    // manual card: Play button, no timer
             autoAdvanceDeadline = nil
             return
@@ -297,19 +331,100 @@ class PlayerViewModel: ObservableObject {
         autoAdvanceDeadline = nil
     }
 
+    // MARK: - IntroDB skip segments
+
+    private func loadSkipIntervalsIfNeeded(meta: NuvioMeta, isTrailerPlayback: Bool) {
+        guard !isTrailerPlayback,
+              meta.isSeries,
+              let episodeNumbers = activeEpisodeNumbers else {
+            return
+        }
+
+        let imdbId = meta.imdbId ?? meta.id
+        skipIntervalLoadTask = Task { [weak self] in
+            let intervals = await IntroDBSkipService.shared.intervals(
+                imdbId: imdbId,
+                season: episodeNumbers.season,
+                episode: episodeNumbers.episode
+            )
+            await MainActor.run {
+                guard let self else { return }
+                self.skipIntervals = intervals
+                self.updateSkipIntervalState()
+            }
+        }
+    }
+
+    private func updateSkipIntervalState() {
+        guard !skipIntervals.isEmpty,
+              time.current > 0,
+              status != .ended,
+              subtitle != PlaybackMarkers.trailerSubtitle else {
+            activeSkipInterval = nil
+            return
+        }
+
+        let current = time.current
+        let interval = skipIntervals.first { segment in
+            current >= max(segment.startTime - 0.35, 0) && current < segment.endTime - 0.25
+        }
+
+        guard let interval else {
+            activeSkipInterval = nil
+            skipSegmentCountdown = nil
+            skipSegmentAutoHideDeadline = nil
+            return
+        }
+
+        if autoHiddenSkipIntervalId == interval.id, !showControls {
+            skipSegmentCountdown = nil
+            skipSegmentAutoHideDeadline = nil
+            return
+        }
+
+        if activeSkipInterval?.id != interval.id {
+            activeSkipInterval = interval
+            skipSegmentAutoHideDeadline = Date().addingTimeInterval(Double(Self.skipSegmentAutoHideSeconds))
+            skipSegmentCountdown = Self.skipSegmentAutoHideSeconds
+            autoHiddenSkipIntervalId = nil
+        }
+
+        if showControls {
+            skipSegmentAutoHideDeadline = nil
+            skipSegmentCountdown = nil
+            return
+        }
+
+        if skipSegmentAutoHideDeadline == nil {
+            skipSegmentAutoHideDeadline = Date().addingTimeInterval(Double(Self.skipSegmentAutoHideSeconds))
+            skipSegmentCountdown = Self.skipSegmentAutoHideSeconds
+        }
+
+        guard let deadline = skipSegmentAutoHideDeadline else { return }
+        let secondsLeft = deadline.timeIntervalSinceNow
+        if secondsLeft <= 0.05 {
+            autoHiddenSkipIntervalId = interval.id
+            skipSegmentCountdown = nil
+            skipSegmentAutoHideDeadline = nil
+        } else {
+            skipSegmentCountdown = max(1, Int(secondsLeft.rounded(.up)))
+        }
+    }
+
     /// Play the next episode now (the card's Play button).
     func playNextEpisode() {
         advance(userInitiated: true)
     }
 
     private var canAutoAdvanceOnEnd: Bool {
-        nextEpisode != nil && autoPlayNextEnabled && !autoAdvanceDisabled
+        nextEpisode != nil && nextEpisodeIsPlayable && autoPlayNextEnabled && !autoAdvanceDisabled
             && subtitle != PlaybackMarkers.trailerSubtitle
     }
 
     private func advance(userInitiated: Bool) {
         guard !isAdvanceInFlight,
               let next = nextEpisode,
+              EpisodeReleasePolicy.hasAired(next.released),
               let resolver = resolveNextStream else { return }
         isAdvanceInFlight = true
         isAdvancingEpisode = true
@@ -322,13 +437,12 @@ class PlayerViewModel: ObservableObject {
         // bug where a finished episode made the whole series vanish from Home.
         if let activeMeta {
             markWatchedIfNeeded()
-            ContinueWatchingStore.save(
+            ContinueWatchingStore.saveUpNext(
                 meta: activeMeta,
-                streamUrl: "",
-                position: 1,
-                duration: max(time.duration, 120),
+                duration: time.duration,
                 season: next.season,
-                episode: next.episode
+                episode: next.episode,
+                released: next.released
             )
         }
 
@@ -450,6 +564,7 @@ class PlayerViewModel: ObservableObject {
 
         applyPendingResumeIfNeeded()
         addPendingExternalSubtitlesIfNeeded()
+        updateSkipIntervalState()
 
         if c.isPlayerEnded {
             // Roll straight into the next episode instead of ending, when armed —
@@ -572,8 +687,11 @@ class PlayerViewModel: ObservableObject {
         pollTimer = nil
         controlsHideTimer?.invalidate()
         controlsHideTimer = nil
+        stopRepeatingSkip()
         trailerResolveTask?.cancel()
         trailerResolveTask = nil
+        skipIntervalLoadTask?.cancel()
+        skipIntervalLoadTask = nil
         playerController.pausePlayback()
         saveProgress(force: true)
         playerController.destroyPlayer()
@@ -588,20 +706,63 @@ class PlayerViewModel: ObservableObject {
         playerController.seekToMs(Int64(seconds * 1000))
     }
 
+    func skipActiveInterval() {
+        guard let interval = activeSkipInterval else { return }
+        autoHiddenSkipIntervalId = interval.id
+        skipSegmentCountdown = nil
+        skipSegmentAutoHideDeadline = nil
+        activeSkipInterval = nil
+        seek(to: min(interval.endTime + 0.25, max(time.duration - 0.5, interval.endTime)))
+        showControls = false
+        scheduleControlsHide()
+    }
+
     func skipForward() {
-        playerController.seekByMs(15_000)
-        // Fast-forwarding near the end (e.g. into credits / a post-credit scene)
-        // cancels the auto-advance countdown; the card stays for a manual Play.
+        performSeekStep(ms: seekStepMs)
+    }
+
+    func skipBackward() {
+        performSeekStep(ms: -seekStepMs)
+    }
+
+    func beginRepeatingSkipForward() {
+        beginRepeatingSeek(ms: seekStepMs)
+    }
+
+    func beginRepeatingSkipBackward() {
+        beginRepeatingSeek(ms: -seekStepMs)
+    }
+
+    func stopRepeatingSkip() {
+        seekRepeatTimer?.invalidate()
+        seekRepeatTimer = nil
+    }
+
+    private func beginRepeatingSeek(ms: Int64) {
+        stopRepeatingSkip()
+        performSeekStep(ms: ms)
+        seekRepeatTimer = Timer.scheduledTimer(withTimeInterval: Self.seekRepeatInterval, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.performSeekStep(ms: ms)
+            }
+        }
+    }
+
+    private func performSeekStep(ms: Int64) {
+        playerController.seekByMs(ms)
         if showNextEpisodeCard { disableAutoAdvanceForCurrentEpisode() }
         showControls = true
         scheduleControlsHide()
     }
 
-    func skipBackward() {
-        playerController.seekByMs(-15_000)
-        if showNextEpisodeCard { disableAutoAdvanceForCurrentEpisode() }
-        showControls = true
-        scheduleControlsHide()
+    private var seekStepMs: Int64 {
+        Int64(seekStepSeconds) * 1000
+    }
+
+    func setSeekStepSeconds(_ seconds: Int) {
+        let value = PlayerSeekSettings.validSteps.contains(seconds) ? seconds : PlayerSeekSettings.defaultStep
+        seekStepSeconds = value
+        PlayerSeekSettings.current = value
     }
 
     /// Cancels the countdown for the current episode after a manual seek; the
@@ -911,6 +1072,7 @@ class PlayerViewModel: ObservableObject {
                 guard !self.controlsAutoHideSuspended else { return }
                 if self.status == .playing || self.status == .paused {
                     self.showControls = false
+                    self.updateSkipIntervalState()
                 }
             }
         }
@@ -918,11 +1080,13 @@ class PlayerViewModel: ObservableObject {
 
     func toggleControls() {
         showControls.toggle()
+        updateSkipIntervalState()
         if showControls { scheduleControlsHide() }
     }
 
     func revealControls() {
         showControls = true
+        updateSkipIntervalState()
         if status == .playing || status == .paused {
             scheduleControlsHide()
         }
@@ -933,6 +1097,7 @@ class PlayerViewModel: ObservableObject {
         if suspended {
             controlsHideTimer?.invalidate()
             showControls = true
+            updateSkipIntervalState()
         } else if showControls {
             scheduleControlsHide()
         }
@@ -965,6 +1130,19 @@ class PlayerViewModel: ObservableObject {
             return
         }
 
+        if shouldSaveNextUpProgress, let nextEpisode {
+            markWatchedIfNeeded()
+            ContinueWatchingStore.saveUpNext(
+                meta: activeMeta,
+                duration: time.duration,
+                season: nextEpisode.season,
+                episode: nextEpisode.episode,
+                released: nextEpisode.released
+            )
+            lastProgressSave = Date()
+            return
+        }
+
         ContinueWatchingStore.save(
             meta: activeMeta,
             streamUrl: activeStreamURL,
@@ -980,6 +1158,19 @@ class PlayerViewModel: ObservableObject {
         if time.duration >= 60, time.current / time.duration >= 0.92 {
             markWatchedIfNeeded()
         }
+    }
+
+    private var shouldSaveNextUpProgress: Bool {
+        guard showNextEpisodeCard,
+              nextEpisode != nil,
+              time.duration >= 60 else {
+            return false
+        }
+        return time.remaining <= Self.nextCardLeadSeconds && time.current / time.duration >= 0.5
+    }
+
+    private var nextEpisodeIsPlayable: Bool {
+        nextEpisode.map { EpisodeReleasePolicy.hasAired($0.released) } ?? false
     }
 
     /// Marks the current playback watched — the specific episode for series,

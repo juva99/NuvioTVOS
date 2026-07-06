@@ -45,6 +45,22 @@ enum PlaybackSpeed: Float, CaseIterable, Identifiable {
     }
 }
 
+enum PlayerSeekSettings {
+    static let defaultStep = 15
+    static let validSteps = [5, 10, 15, 30, 60]
+    private static let key = "player.seekStepSeconds"
+
+    static var current: Int {
+        get {
+            let stored = UserDefaults.standard.integer(forKey: key)
+            return validSteps.contains(stored) ? stored : defaultStep
+        }
+        set {
+            UserDefaults.standard.set(validSteps.contains(newValue) ? newValue : defaultStep, forKey: key)
+        }
+    }
+}
+
 enum QualityOption: Identifiable, Equatable {
     case auto
     case manual(resolution: String, bitrate: Int)

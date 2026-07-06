@@ -8,6 +8,10 @@ private enum PlayerControlFocus: Hashable {
 
 struct PlayerControls: View {
     @ObservedObject var viewModel: PlayerViewModel
+    var isSkipSegmentFocused: Bool = false
+    var isNextEpisodeFocused: Bool = false
+    var onFocusSkipSegment: () -> Void = {}
+    var onFocusNextEpisode: () -> Void = {}
 
     @FocusState private var focusedControl: PlayerControlFocus?
 
@@ -41,17 +45,36 @@ struct PlayerControls: View {
         }
         .onChange(of: viewModel.showControls) { isVisible in
             // Controls stay mounted, so re-grab focus each time they reappear.
-            if isVisible {
+            if isVisible, !isSkipSegmentFocused, !isNextEpisodeFocused {
                 DispatchQueue.main.async { focusedControl = .timeline }
+            }
+        }
+        .onChange(of: isSkipSegmentFocused) { isFocused in
+            if isFocused {
+                focusedControl = nil
+            }
+        }
+        .onChange(of: isNextEpisodeFocused) { isFocused in
+            if isFocused {
+                focusedControl = nil
             }
         }
         .onDisappear {
             viewModel.setControlsAutoHideSuspended(false)
         }
         .onMoveCommand { direction in
+            guard !isSkipSegmentFocused, !isNextEpisodeFocused else { return }
             switch direction {
             case .up:
-                focusedControl = .play
+                if focusedControl == .timeline, viewModel.showSkipSegmentCard {
+                    focusedControl = nil
+                    DispatchQueue.main.async { onFocusSkipSegment() }
+                } else if focusedControl == .timeline, viewModel.showNextEpisodeCard {
+                    focusedControl = nil
+                    DispatchQueue.main.async { onFocusNextEpisode() }
+                } else {
+                    focusedControl = .play
+                }
             case .down:
                 focusedControl = .timeline
             case .left:
@@ -308,6 +331,14 @@ struct NextEpisodeOverlay: View {
         "S\(episode.season) E\(episode.episode) • \(episode.title)"
     }
 
+    private var isPlayable: Bool {
+        EpisodeReleasePolicy.hasAired(episode.released)
+    }
+
+    private var airDateText: String {
+        EpisodeReleasePolicy.airDateText(for: episode.released).map { "Airs \($0)" } ?? "Upcoming"
+    }
+
     var body: some View {
         HStack(spacing: 22) {
             thumbnail
@@ -320,7 +351,11 @@ struct NextEpisodeOverlay: View {
                     .font(.system(size: 29, weight: .bold))
                     .foregroundColor(.white)
                     .lineLimit(1)
-                if let countdown, !isAdvancing {
+                if !isPlayable {
+                    Text(airDateText)
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundColor(.white.opacity(0.7))
+                } else if let countdown, !isAdvancing {
                     Text("Playing in \(countdown)s")
                         .font(.system(size: 20, weight: .medium))
                         .foregroundColor(.white.opacity(0.7))
@@ -373,23 +408,73 @@ struct NextEpisodeOverlay: View {
                     .scaleEffect(0.9)
                 Text("Starting…")
             } else {
-                Image(systemName: "play.fill")
+                Image(systemName: isPlayable ? "play.fill" : "calendar")
                     .font(.system(size: 22, weight: .bold))
-                Text(countdown != nil ? "Play Now" : "Play")
+                Text(isPlayable ? (countdown != nil ? "Play Now" : "Play") : "Not Yet")
             }
         }
         .font(.system(size: 24, weight: .semibold))
-        .foregroundColor(isFocused ? .black : .white)
+        .foregroundColor(isFocused && isPlayable ? .black : .white)
         .padding(.horizontal, 30)
         .padding(.vertical, 16)
         .background {
-            if isFocused {
+            if isFocused && isPlayable {
                 Capsule().fill(Color.white)
             } else {
                 Capsule().fill(Color.white.opacity(0.14))
                     .overlay(Capsule().strokeBorder(Color.white.opacity(0.4), lineWidth: 1))
             }
         }
+    }
+}
+
+struct SkipSegmentOverlay: View {
+    let interval: SkipInterval
+    let countdown: Int?
+    var isFocused: Bool
+    let onSkip: () -> Void
+
+    var body: some View {
+        HStack(spacing: 16) {
+            Image(systemName: "forward.end.fill")
+                .font(.system(size: 24, weight: .bold))
+                .foregroundColor(isFocused ? .black : .white)
+                .frame(width: 46, height: 46)
+                .background {
+                    Circle().fill(isFocused ? Color.white : Color.white.opacity(0.14))
+                }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(interval.label)
+                    .font(.system(size: 26, weight: .bold))
+                    .foregroundColor(.white)
+                Text(detailText)
+                    .font(.system(size: 18, weight: .medium))
+                    .foregroundColor(.white.opacity(0.62))
+                    .contentTransition(.numericText())
+            }
+
+            Spacer(minLength: 10)
+        }
+        .padding(.leading, 18)
+        .padding(.trailing, 20)
+        .padding(.vertical, 14)
+        .frame(width: 330)
+        .glassRoundedRect(cornerRadius: 24)
+        .overlay(
+            RoundedRectangle(cornerRadius: 24, style: .continuous)
+                .strokeBorder(Color.white.opacity(isFocused ? 0.85 : 0.14), lineWidth: isFocused ? 3 : 1)
+        )
+        .shadow(color: .black.opacity(0.55), radius: 22, x: 0, y: 10)
+        .animation(.easeInOut(duration: 0.18), value: isFocused)
+        .animation(.easeInOut(duration: 0.18), value: countdown)
+    }
+
+    private var detailText: String {
+        if let countdown {
+            return "Hides in \(countdown)s"
+        }
+        return PlayerTime.formatted(time: interval.endTime - interval.startTime)
     }
 }
 
@@ -480,6 +565,7 @@ struct PlayerSettingsPanel: View {
         case audio(String)
         case audioControl(AudioControl)
         case speed(Float)
+        case seekStep(Int)
         case style(StyleControl)
     }
 
@@ -1130,25 +1216,48 @@ struct PlayerSettingsPanel: View {
     }
 
     private var speedPage: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            columnHeader("Playback Speed")
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 12) {
-                    ForEach(PlaybackSpeed.allCases) { speed in
-                        simpleRow(
-                            title: speed.label,
-                            isSelected: viewModel.playbackSpeed == speed,
-                            focusKey: .speed(speed.rawValue)
-                        ) {
-                            viewModel.setSpeed(speed)
+        HStack(alignment: .top, spacing: 56) {
+            VStack(alignment: .leading, spacing: 18) {
+                columnHeader("Playback Speed")
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 12) {
+                        ForEach(PlaybackSpeed.allCases) { speed in
+                            simpleRow(
+                                title: speed.label,
+                                isSelected: viewModel.playbackSpeed == speed,
+                                focusKey: .speed(speed.rawValue)
+                            ) {
+                                viewModel.setSpeed(speed)
+                            }
                         }
                     }
+                    .padding(.vertical, 6)
                 }
-                .padding(.vertical, 6)
+                .focusSection()
             }
-            .focusSection()
+            .frame(width: 700, alignment: .leading)
+
+            VStack(alignment: .leading, spacing: 18) {
+                columnHeader("Seek Step")
+                ScrollView(showsIndicators: false) {
+                    VStack(spacing: 12) {
+                        ForEach(PlayerSeekSettings.validSteps, id: \.self) { seconds in
+                            simpleRow(
+                                title: "\(seconds)s",
+                                isSelected: viewModel.seekStepSeconds == seconds,
+                                focusKey: .seekStep(seconds)
+                            ) {
+                                viewModel.setSeekStepSeconds(seconds)
+                            }
+                        }
+                    }
+                    .padding(.vertical, 6)
+                }
+                .focusSection()
+            }
+            .frame(width: 420, alignment: .leading)
         }
-        .frame(width: 700, alignment: .leading)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func simpleRow(
