@@ -94,16 +94,10 @@ struct ContentView: View {
                         // Escape hatch: never trap the user here if the pull
                         // stalls (dead network, server hiccup).
                         .task {
-                            try? await Task.sleep(nanoseconds: 8_000_000_000)
+                            try? await Task.sleep(nanoseconds: 75_000_000_000)
                             withAnimation(.easeInOut(duration: 0.28)) {
                                 awaitingPostLoginSync = false
                             }
-                        }
-                } else if syncManager.shouldShowProfileSelectionLoading(for: profileViewModel.profiles) {
-                    ProfileSelectionSyncView()
-                        .transition(.opacity)
-                        .task {
-                            syncManager.refreshProfileSelectionIfNeeded()
                         }
                 } else {
                     UserProfileView(viewModel: profileViewModel)
@@ -168,7 +162,7 @@ struct ContentView: View {
             syncManager.authStateChanged(state)
         }
         .onReceive(syncManager.$isPullingAccountProfiles) { pulling in
-            if !pulling, awaitingPostLoginSync {
+            if !pulling, !syncManager.isBackfillingAccountProfiles, awaitingPostLoginSync {
                 profileViewModel.loadProfiles()
                 profileViewModel.loadActiveProfile()
                 withAnimation(.easeInOut(duration: 0.28)) {
@@ -177,11 +171,9 @@ struct ContentView: View {
             }
         }
         .onReceive(syncManager.$isBackfillingAccountProfiles) { backfilling in
-            if !backfilling {
+            if !backfilling, !syncManager.isPullingAccountProfiles, awaitingPostLoginSync {
                 profileViewModel.loadProfiles()
                 profileViewModel.loadActiveProfile()
-            }
-            if !backfilling, !syncManager.isPullingAccountProfiles, awaitingPostLoginSync {
                 withAnimation(.easeInOut(duration: 0.28)) {
                     awaitingPostLoginSync = false
                 }
@@ -667,51 +659,6 @@ private struct AccountSyncWaitView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         // Give the focus engine somewhere to land; with no focusable view on
         // screen a Menu press would quit the app.
-        .focusable()
-    }
-}
-
-/// Shown on the profile-selection step when the account is signed in but the
-/// only local profile is still the seeded guest. Keeps the transition feeling
-/// like the profile screen is refreshing, rather than briefly showing the wrong
-/// card.
-private struct ProfileSelectionSyncView: View {
-    var body: some View {
-        ZStack {
-            ProfileBackground()
-
-            VStack(spacing: 0) {
-                Spacer().frame(height: 162)
-
-                Text("Who's watching?")
-                    .font(.custom("Inter-Bold", size: 62))
-                    .foregroundColor(.white)
-
-                Spacer().frame(height: 14)
-
-                Text("Loading your profiles")
-                    .font(.custom("Inter-Regular", size: 28))
-                    .foregroundColor(.white.opacity(0.6))
-
-                Spacer()
-
-                VStack(spacing: 24) {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .tint(.white)
-                        .scaleEffect(1.45)
-
-                    Text("Refreshing account")
-                        .font(.custom("Inter-Bold", size: 30))
-                        .foregroundColor(.white.opacity(0.86))
-                }
-                .frame(height: 260)
-
-                Spacer()
-                Spacer().frame(height: 56)
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
         .focusable()
     }
 }

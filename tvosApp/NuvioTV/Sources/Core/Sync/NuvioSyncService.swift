@@ -23,10 +23,9 @@ final class NuvioSyncManager: ObservableObject {
     /// names instead of rendering local stubs.
     @Published private(set) var isPullingAccountProfiles = false
     @Published private(set) var isBackfillingAccountProfiles = false
-    @Published private(set) var didFinishAccountProfileRefresh = false
 
     var isWaitingForAccountProfiles: Bool {
-        isPullingAccountProfiles
+        isPullingAccountProfiles || isBackfillingAccountProfiles
     }
 
     private let client = SupabaseSyncClient()
@@ -42,7 +41,6 @@ final class NuvioSyncManager: ObservableObject {
     private var pullTask: Task<Void, Never>?
     private var pushTask: Task<Void, Never>?
     private var profileBackfillTask: Task<Void, Never>?
-    private var profileBackfillGeneration = 0
     private var completedInitialPullKeys: Set<String> = []
     private var observedActiveProfileId: String?
     private var isApplyingRemote = false
@@ -115,7 +113,6 @@ final class NuvioSyncManager: ObservableObject {
     func authStateChanged(_ state: AuthState) {
         switch state {
         case .fullAccount:
-            didFinishAccountProfileRefresh = false
             if AuthConfig.isConfigured {
                 isPullingAccountProfiles = true
             }
@@ -128,27 +125,9 @@ final class NuvioSyncManager: ObservableObject {
             observedActiveProfileId = nil
             isPullingAccountProfiles = false
             isBackfillingAccountProfiles = false
-            didFinishAccountProfileRefresh = false
         case .loading:
             break
         }
-    }
-
-    func shouldShowProfileSelectionLoading(for profiles: [Profile]) -> Bool {
-        guard AuthConfig.isConfigured, authManager?.isAuthenticated == true else { return false }
-        guard profiles.isEmpty || profiles.allSatisfy(Self.isPlaceholderProfile) else { return false }
-        return isPullingAccountProfiles || isBackfillingAccountProfiles || !didFinishAccountProfileRefresh
-    }
-
-    func refreshProfileSelectionIfNeeded() {
-        guard AuthConfig.isConfigured, authManager?.isAuthenticated == true else { return }
-        guard let profileViewModel else { return }
-        guard profileViewModel.profiles.isEmpty || profileViewModel.profiles.allSatisfy(Self.isPlaceholderProfile) else {
-            didFinishAccountProfileRefresh = true
-            return
-        }
-        guard !isPullingAccountProfiles, !isBackfillingAccountProfiles else { return }
-        startProfileBackfill()
     }
 
     func activeProfileChanged(_ profile: Profile?) {
@@ -201,14 +180,8 @@ final class NuvioSyncManager: ObservableObject {
         // path clears it earlier, as soon as profile names are in.
         defer { isPullingAccountProfiles = false }
 
-        guard let authManager, let profileViewModel else {
-            didFinishAccountProfileRefresh = true
-            return
-        }
-        guard let session = await authManager.validSessionForSync() else {
-            didFinishAccountProfileRefresh = true
-            return
-        }
+        guard let authManager, let profileViewModel else { return }
+        guard let session = await authManager.validSessionForSync() else { return }
 
         do {
             // The read right after a fresh login often fails transiently —
@@ -220,7 +193,7 @@ final class NuvioSyncManager: ObservableObject {
             // sync wait screen covers the delay.
             var remoteProfiles: [RemoteProfile] = (try? await client.pullProfiles(session: session)) ?? []
             var attempt = 0
-            while remoteProfiles.isEmpty && attempt < 2 {
+            while remoteProfiles.isEmpty && attempt < 3 {
                 attempt += 1
                 try await Task.sleep(nanoseconds: UInt64(attempt) * 1_500_000_000)
                 try ensureStillSyncing()
@@ -239,9 +212,7 @@ final class NuvioSyncManager: ObservableObject {
                 // Real profiles are in — no need for any in-flight backfill.
                 profileBackfillTask?.cancel()
                 isBackfillingAccountProfiles = false
-                didFinishAccountProfileRefresh = true
             } else if profileViewModel.profiles.contains(where: { !Self.isPlaceholderProfile($0) }) {
-                didFinishAccountProfileRefresh = true
                 // Seed the account only with profiles the user actually made.
                 // Pushing the untouched "Nuvio Guest" seed here would rename
                 // the account's primary profile if the empty read was false.
@@ -397,8 +368,6 @@ final class NuvioSyncManager: ObservableObject {
             // real profiles replace it live. No-op once real profiles exist.
             if profileViewModel.profiles.allSatisfy(Self.isPlaceholderProfile) {
                 startProfileBackfill()
-            } else {
-                didFinishAccountProfileRefresh = true
             }
         }
     }
@@ -413,24 +382,15 @@ final class NuvioSyncManager: ObservableObject {
     /// empty account simply keeps reading empty and the loop exits with no
     /// visible change.
     private func startProfileBackfill() {
-        guard !isBackfillingAccountProfiles else { return }
         profileBackfillTask?.cancel()
-        profileBackfillGeneration += 1
-        let generation = profileBackfillGeneration
         isBackfillingAccountProfiles = true
-        didFinishAccountProfileRefresh = false
         print("Nuvio sync starting profile backfill (post-login read yielded no profiles).")
         profileBackfillTask = Task { @MainActor [weak self] in
-            defer {
-                if let self, self.profileBackfillGeneration == generation {
-                    self.isBackfillingAccountProfiles = false
-                    self.didFinishAccountProfileRefresh = true
-                }
-            }
-            // Short backoff pass shown behind the who's-watching loading state.
-            // If the backend is still racing the fresh token, the user sees a
-            // smooth profile refresh instead of the local "Nuvio Guest" seed.
-            let delays: [UInt64] = [1, 2, 3, 5, 8, 10]
+            defer { self?.isBackfillingAccountProfiles = false }
+            // Backoff between attempts (seconds); spans ~55s so a slow backend
+            // that only makes a fresh account's profiles readable well after
+            // the token is issued still gets caught.
+            let delays: [UInt64] = [2, 3, 4, 6, 8, 10, 10, 12]
             for seconds in delays {
                 do {
                     try await Task.sleep(nanoseconds: seconds * 1_000_000_000)

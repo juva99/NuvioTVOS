@@ -94,7 +94,7 @@ public struct UserProfileView: View {
 }
 
 /// Dark navy base with a soft blue glow toward the top, matching the brand.
-struct ProfileBackground: View {
+private struct ProfileBackground: View {
     var body: some View {
         ZStack {
             LinearGradient(
