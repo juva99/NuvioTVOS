@@ -2,7 +2,7 @@ import SwiftUI
 import Foundation
 
 public struct UserProfileView: View {
-    @ObservedObject private var viewModel: ProfileViewModel
+    @StateObject private var viewModel: ProfileViewModel
     @State private var showingAddProfile = false
     @State private var newProfileName = ""
     @State private var newProfilePin = ""
@@ -12,7 +12,7 @@ public struct UserProfileView: View {
     private static let addProfileFocusId = "add_profile"
 
     public init(viewModel: ProfileViewModel) {
-        self.viewModel = viewModel
+        _viewModel = StateObject(wrappedValue: viewModel)
     }
 
     public var body: some View {
