@@ -36,7 +36,17 @@ struct PlayerView: View {
                 .ignoresSafeArea()
 
             RemoteSeekPressCatcher(
-                isEnabled: { !viewModel.showControls && !viewModel.showSettingsPanel },
+                // Active when the controls are hidden, or when they're up and the
+                // timeline scrubber holds focus — so a held left/right keeps
+                // seeking until release in both states. Never while the play/
+                // settings buttons are focused (there left/right navigates) or
+                // the settings panel is open. Passed as a plain Bool (not a
+                // closure) so `updateUIViewController` runs on every change and
+                // the catcher can re-grab first responder — the SwiftUI focus
+                // engine hands first responder to the focused control otherwise,
+                // and a sibling controller would silently stop receiving presses.
+                isActive: !viewModel.showSettingsPanel
+                    && (!viewModel.showControls || viewModel.isTimelineFocused),
                 onBeginBackward: { viewModel.beginRepeatingSkipBackward() },
                 onBeginForward: { viewModel.beginRepeatingSkipForward() },
                 onEnd: { viewModel.stopRepeatingSkip() }
@@ -280,26 +290,28 @@ struct MPVVideoSurface: UIViewControllerRepresentable {
 }
 
 private struct RemoteSeekPressCatcher: UIViewControllerRepresentable {
-    let isEnabled: () -> Bool
+    let isActive: Bool
     let onBeginBackward: () -> Void
     let onBeginForward: () -> Void
     let onEnd: () -> Void
 
     func makeUIViewController(context: Context) -> RemoteSeekPressViewController {
         let controller = RemoteSeekPressViewController()
-        controller.isEnabled = isEnabled
         controller.onBeginBackward = onBeginBackward
         controller.onBeginForward = onBeginForward
         controller.onEnd = onEnd
+        controller.setActive(isActive)
         return controller
     }
 
     func updateUIViewController(_ controller: RemoteSeekPressViewController, context: Context) {
-        controller.isEnabled = isEnabled
         controller.onBeginBackward = onBeginBackward
         controller.onBeginForward = onBeginForward
         controller.onEnd = onEnd
-        controller.view.setNeedsFocusUpdate()
+        // Re-assert on every SwiftUI update: when a control gains focus the focus
+        // engine takes first responder, so a sibling catcher has to grab it back
+        // to keep receiving the held left/right presses on the device.
+        controller.setActive(isActive)
     }
 }
 
@@ -309,30 +321,45 @@ private final class RemoteSeekPressViewController: UIViewController {
         case forward
     }
 
-    var isEnabled: () -> Bool = { false }
     var onBeginBackward: () -> Void = {}
     var onBeginForward: () -> Void = {}
     var onEnd: () -> Void = {}
 
     private var activeDirection: Direction?
+    private var isActive = false
 
-    override var canBecomeFirstResponder: Bool { true }
+    override var canBecomeFirstResponder: Bool { isActive }
+
+    /// Enable/disable seek interception and (re)claim first responder so held
+    /// directional presses route here instead of the focused SwiftUI control.
+    func setActive(_ active: Bool) {
+        isActive = active
+        if active {
+            if !isFirstResponder { becomeFirstResponder() }
+        } else {
+            if activeDirection != nil {
+                activeDirection = nil
+                onEnd()
+            }
+            if isFirstResponder { resignFirstResponder() }
+        }
+    }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        becomeFirstResponder()
+        if isActive { becomeFirstResponder() }
     }
 
     override func didMove(toParent parent: UIViewController?) {
         super.didMove(toParent: parent)
-        if parent != nil {
+        if parent != nil, isActive {
             becomeFirstResponder()
         }
     }
 
     override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         guard activeDirection == nil,
-              isEnabled(),
+              isActive,
               let direction = seekDirection(in: presses) else {
             super.pressesBegan(presses, with: event)
             return

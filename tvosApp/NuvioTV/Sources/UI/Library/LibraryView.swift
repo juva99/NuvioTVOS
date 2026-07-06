@@ -13,6 +13,10 @@ private enum LibraryGridMetrics {
 public struct LibraryView: View {
     @StateObject private var viewModel: LibraryViewModel
     let onContentClick: (String, String) -> Void
+    var onLongPress: ((NuvioMeta) -> Void)? = nil
+    /// Opens the debrid Cloud Library screen; shown only when a supported
+    /// provider (Premiumize / TorBox) with an API key is configured.
+    var onOpenCloudLibrary: (() -> Void)? = nil
     @FocusState private var focusedItemID: String?
     /// Last card focused in the grid, kept so returning from details (which
     /// steals focus and nils `focusedItemID`) restores that card instead of
@@ -25,10 +29,20 @@ public struct LibraryView: View {
     @Environment(\.isEnabled) private var isEnabled
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
+    @AppStorage(SettingsKey.debridProvider) private var debridProvider = "None"
+    @AppStorage(SettingsKey.debridApiKey) private var debridApiKey = ""
 
-    public init(viewModel: LibraryViewModel, onContentClick: @escaping (String, String) -> Void) {
+    init(viewModel: LibraryViewModel, onContentClick: @escaping (String, String) -> Void, onLongPress: ((NuvioMeta) -> Void)? = nil, onOpenCloudLibrary: (() -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.onContentClick = onContentClick
+        self.onLongPress = onLongPress
+        self.onOpenCloudLibrary = onOpenCloudLibrary
+    }
+
+    /// Cloud Library is only reachable for the providers that expose one.
+    private var cloudLibraryAvailable: Bool {
+        (debridProvider == "Premiumize" || debridProvider == "TorBox")
+            && !debridApiKey.trimmingCharacters(in: .whitespaces).isEmpty
     }
     
     public var body: some View {
@@ -57,6 +71,12 @@ public struct LibraryView: View {
                             }
                         }
                     }
+
+                    if cloudLibraryAvailable, let onOpenCloudLibrary {
+                        Button(action: onOpenCloudLibrary) {
+                            Label("Cloud", systemImage: "cloud")
+                        }
+                    }
                 }
 
                 ScrollView {
@@ -71,7 +91,11 @@ public struct LibraryView: View {
 
                             LazyVGrid(columns: gridColumns, alignment: .leading, spacing: LibraryGridMetrics.posterGap) {
                                 ForEach(viewModel.sortedAndGroupedItems[group] ?? [], id: \.id) { item in
-                                    LibraryItemButton(item: item, externalFocus: $focusedItemID) {
+                                    LibraryItemButton(
+                                        item: item,
+                                        externalFocus: $focusedItemID,
+                                        onLongPress: onLongPress.map { cb in { cb(item.asNuvioMeta) } }
+                                    ) {
                                         onContentClick(item.id, item.contentType)
                                     }
                                     .disabled(overlayRestoreItemID != nil && overlayRestoreItemID != item.id)
@@ -140,6 +164,7 @@ public struct LibraryView: View {
 struct LibraryItemButton: View {
     let item: StremioMeta
     var externalFocus: FocusState<String?>.Binding? = nil
+    var onLongPress: (() -> Void)? = nil
     let action: () -> Void
 
     @FocusState private var isFocused: Bool
@@ -196,6 +221,9 @@ struct LibraryItemButton: View {
         .focused($isFocused)
         .modifier(ExternalFocusBinding(binding: externalFocus, id: item.id))
         .focusEffectDisabledIfAvailable()
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.45).onEnded { _ in onLongPress?() }
+        )
         .zIndex(isFocused ? 1 : 0)
     }
 
@@ -205,5 +233,34 @@ struct LibraryItemButton: View {
 
     private var cardCornerRadius: CGFloat {
         16
+    }
+}
+
+extension StremioMeta {
+    /// Minimal NuvioMeta for the quick-actions menu (title + library/watched
+    /// toggles key off id/type/name; the richer fields aren't needed here).
+    var asNuvioMeta: NuvioMeta {
+        NuvioMeta(
+            id: id,
+            name: name,
+            description: description,
+            posterUrl: poster,
+            backgroundUrl: background,
+            logoUrl: logo,
+            imdbId: id.hasPrefix("tt") ? id : nil,
+            tmdbId: nil,
+            type: contentType,
+            year: year.map(Int.init),
+            genres: genres,
+            rating: imdbRating.flatMap(Double.init),
+            releaseInfo: releaseInfo,
+            runtime: runtime,
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: nil
+        )
     }
 }

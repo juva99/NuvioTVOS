@@ -28,6 +28,11 @@ class PlayerViewModel: ObservableObject {
     @Published var qualities: [QualityOption] = [.auto]
     @Published var currentQuality: QualityOption = .auto
     @Published var showControls: Bool = true
+    /// True while the transport controls are up and the timeline scrubber holds
+    /// focus. Lets the remote press-catcher drive continuous hold-to-seek even
+    /// with the controls visible, matching the controls-hidden behaviour.
+    /// @Published so the catcher re-asserts first responder when it flips.
+    @Published var isTimelineFocused: Bool = false
     @Published var title: String = ""
     @Published var subtitle: String = ""
     /// Every external subtitle the stream offered (all languages), browsable in

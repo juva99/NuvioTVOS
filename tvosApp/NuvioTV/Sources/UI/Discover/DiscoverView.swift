@@ -11,6 +11,7 @@ private enum DiscoverGridMetrics {
 /// The host provides the outer title, padding and background.
 struct DiscoverSection: View {
     let onContentClick: (String, String) -> Void
+    var onLongPress: ((NuvioMeta) -> Void)? = nil
     @StateObject private var viewModel = DiscoverViewModel()
     @FocusState private var focusedCardID: String?
     /// Last card focused in the grid, kept so returning from details (which
@@ -23,8 +24,9 @@ struct DiscoverSection: View {
     @State private var overlayRestoreCardID: String?
     @Environment(\.isEnabled) private var isEnabled
 
-    init(onContentClick: @escaping (String, String) -> Void) {
+    init(onContentClick: @escaping (String, String) -> Void, onLongPress: ((NuvioMeta) -> Void)? = nil) {
         self.onContentClick = onContentClick
+        self.onLongPress = onLongPress
     }
 
     var body: some View {
@@ -125,7 +127,11 @@ struct DiscoverSection: View {
         ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: DiscoverGridMetrics.posterGap) {
                 ForEach(viewModel.items) { item in
-                    DiscoverCard(meta: item, externalFocus: $focusedCardID) {
+                    DiscoverCard(
+                        meta: item,
+                        externalFocus: $focusedCardID,
+                        onLongPress: onLongPress.map { cb in { cb(item) } }
+                    ) {
                         onContentClick(item.id, item.type)
                     }
                     .disabled(overlayRestoreCardID != nil && overlayRestoreCardID != item.id)
@@ -229,6 +235,7 @@ struct FilterMenu<MenuContent: View>: View {
 private struct DiscoverCard: View {
     let meta: NuvioMeta
     var externalFocus: FocusState<String?>.Binding? = nil
+    var onLongPress: (() -> Void)? = nil
     let action: () -> Void
     @FocusState private var focused: Bool
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
@@ -305,6 +312,9 @@ private struct DiscoverCard: View {
         .focused($focused)
         .modifier(ExternalFocusBinding(binding: externalFocus, id: meta.id))
         .focusEffectDisabledIfAvailable()
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.45).onEnded { _ in onLongPress?() }
+        )
         .animation(smoothFocus ? .spring(response: 0.28, dampingFraction: 0.75) : nil, value: focused)
     }
 

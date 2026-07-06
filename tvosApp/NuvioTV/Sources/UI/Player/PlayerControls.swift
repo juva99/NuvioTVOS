@@ -59,7 +59,13 @@ struct PlayerControls: View {
                 focusedControl = nil
             }
         }
+        .onChange(of: focusedControl) { control in
+            // Let the remote press-catcher take over left/right for continuous
+            // hold-to-seek while the scrubber is focused.
+            viewModel.isTimelineFocused = (control == .timeline)
+        }
         .onDisappear {
+            viewModel.isTimelineFocused = false
             viewModel.setControlsAutoHideSuspended(false)
         }
         .onMoveCommand { direction in

@@ -143,6 +143,9 @@ struct NuvioVideo: Identifiable, Codable, Hashable {
 enum EpisodeReleasePolicy {
     static let showUnairedNextUpKey = "nuvio.tv.settings.layout.showUnairedNextUp"
     static let upcomingNextSeasonWindowDays = 7
+    /// How recently an up-next episode must have aired to count as a "New Episode"
+    /// drop rather than an ordinary "Next Up" episode.
+    static let newEpisodeWindowDays = 30
 
     static var showUnairedNextUp: Bool {
         if UserDefaults.standard.object(forKey: showUnairedNextUpKey) == nil {
@@ -179,6 +182,17 @@ enum EpisodeReleasePolicy {
     static func airDateText(for released: String?) -> String? {
         guard let released, !hasAired(released) else { return nil }
         return NuvioDateDisplay.formattedDate(released) ?? released.prefix(10).description
+    }
+
+    /// True when `released` is a real date within the last `days` days. A missing
+    /// or unparseable date returns false, so uncertain entries read as "Next Up"
+    /// rather than over-claiming "New Episode".
+    static func isRecentlyReleased(_ released: String?, within days: Int) -> Bool {
+        guard let releaseDate = isoDate(released),
+              let elapsed = Calendar.current.dateComponents([.day], from: releaseDate, to: today()).day else {
+            return false
+        }
+        return (0...days).contains(elapsed)
     }
 
     private static func isoDate(_ value: String?) -> Date? {
@@ -229,25 +243,64 @@ struct NuvioSubtitle: Identifiable, Codable, Equatable {
 }
 
 struct NuvioStream: Identifiable, Codable {
-    var id: String { url ?? UUID().uuidString }
+    var id: String { url ?? infoHash.map { "\($0):\(fileIdx ?? -1)" } ?? UUID().uuidString }
     let url: String?
     let name: String?
     let description: String?
     let addonName: String?
     let subtitles: [NuvioSubtitle]
+    /// The source add-on's manifest `logo`, shown on the stream card instead of a
+    /// generic placeholder. `nil` when the add-on manifest has no logo.
+    let addonLogoURL: String?
+    /// Torrent info-hash from add-ons like Torrentio. Present when the add-on
+    /// returns a torrent instead of a direct URL; a debrid provider turns this
+    /// into a playable link. See `Core/Debrid`.
+    let infoHash: String?
+    /// Index of the wanted file inside the torrent (for multi-file torrents).
+    let fileIdx: Int?
+    /// Optional tracker/DHT hints the add-on attaches to the torrent.
+    let sources: [String]
+    /// Suggested filename for the wanted file, used by some debrid file pickers.
+    let filename: String?
 
     init(
         url: String?,
         name: String?,
         description: String?,
         addonName: String?,
-        subtitles: [NuvioSubtitle] = []
+        subtitles: [NuvioSubtitle] = [],
+        addonLogoURL: String? = nil,
+        infoHash: String? = nil,
+        fileIdx: Int? = nil,
+        sources: [String] = [],
+        filename: String? = nil
     ) {
         self.url = url
         self.name = name
         self.description = description
         self.addonName = addonName
         self.subtitles = subtitles
+        self.addonLogoURL = addonLogoURL
+        self.infoHash = infoHash
+        self.fileIdx = fileIdx
+        self.sources = sources
+        self.filename = filename
+    }
+
+    /// A stream that has no direct URL but carries a torrent info-hash: it must
+    /// be run through a debrid provider before it can play.
+    var isDebridResolvable: Bool {
+        (url?.isEmpty ?? true) && (infoHash?.isEmpty == false)
+    }
+
+    /// Returns a copy tagged with the source add-on's logo. Used to attach the
+    /// logo after streams are fetched, so the logo lookup never blocks them.
+    func withAddonLogoURL(_ logo: String?) -> NuvioStream {
+        NuvioStream(
+            url: url, name: name, description: description, addonName: addonName,
+            subtitles: subtitles, addonLogoURL: logo, infoHash: infoHash,
+            fileIdx: fileIdx, sources: sources, filename: filename
+        )
     }
 }
 
@@ -307,9 +360,29 @@ struct ContinueWatchingItem: Identifiable, Codable {
     var airDateText: String? { EpisodeReleasePolicy.airDateText(for: released ?? episodeVideo?.released) }
     var upNextBadgeText: String {
         guard isUpNextEntry else { return remainingText }
-        if hasAired { return "NEW EPISODE" }
+        if hasAired { return isNewEpisodeDrop ? "NEW EPISODE" : "NEXT UP" }
         if let airDateText { return "AIRS \(airDateText.uppercased())" }
         return "UPCOMING"
+    }
+
+    /// Distinguishes a freshly-dropped episode from the ordinary next episode in
+    /// a binge. It's only a "new episode" when the up-next episode is the newest
+    /// aired episode in the series *and* it aired recently — so being mid–Season 1
+    /// while Season 2 is already out reads as "Next Up", not "New Episode".
+    var isNewEpisodeDrop: Bool {
+        guard isUpNextEntry, hasAired, let numbers = resolvedNumbers else { return false }
+        // A later aired episode existing (e.g. all of Season 2) means this
+        // up-next episode is back-catalog, not the newest drop.
+        let hasLaterAiredEpisode = (meta.videos ?? []).contains { video in
+            (seasonSortKey(video.season), video.episode) > (seasonSortKey(numbers.season), numbers.episode)
+                && EpisodeReleasePolicy.hasAired(video.released)
+        }
+        if hasLaterAiredEpisode { return false }
+        // Guard against labelling a long-finished show's final episode as "new".
+        return EpisodeReleasePolicy.isRecentlyReleased(
+            released ?? episodeVideo?.released,
+            within: EpisodeReleasePolicy.newEpisodeWindowDays
+        )
     }
 
     init(
@@ -532,6 +605,31 @@ enum ContinueWatchingStore {
         guard let data = try? JSONEncoder().encode(items) else { return }
         UserDefaults.standard.set(data, forKey: storageKey)
         NotificationCenter.default.post(name: changedNotification, object: nil)
+        writeTopShelfFeed()
+    }
+
+    /// Mirrors the active profile's Continue Watching list into the App Group so
+    /// the Top Shelf extension can render the Apple TV home row. No-op when the
+    /// shared container isn't available.
+    private static func writeTopShelfFeed() {
+        let entries = items().prefix(10).map { item -> TopShelfEntry in
+            let fraction = item.duration > 0 ? min(max(item.position / item.duration, 0), 1) : nil
+            var subtitleParts: [String] = []
+            if let season = item.season, let episode = item.episode {
+                subtitleParts.append("S\(season) · E\(episode)")
+            } else if let year = item.meta.year {
+                subtitleParts.append(String(year))
+            }
+            return TopShelfEntry(
+                contentId: item.meta.id,
+                contentType: item.meta.type,
+                title: item.meta.name,
+                subtitle: subtitleParts.isEmpty ? nil : subtitleParts.joined(separator: "  ·  "),
+                imageURL: item.meta.posterUrl,
+                progress: item.isUpNextEntry ? nil : fraction
+            )
+        }
+        TopShelfFeedStore.write(Array(entries))
     }
 
     /// Deletes every profile's watch history (and the legacy shared list).

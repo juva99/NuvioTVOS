@@ -36,6 +36,11 @@ struct DetailsScreen: View {
     @AppStorage(SettingsKey.subtitleLanguageTertiary) private var subtitleLanguageTertiary = "None"
     @AppStorage(SettingsKey.tmdbEnabled) private var tmdbEnabled = false
     @AppStorage(SettingsKey.tmdbApiKey) private var tmdbApiKey = ""
+    @AppStorage(SettingsKey.debridProvider) private var debridProvider = "None"
+    @AppStorage(SettingsKey.debridApiKey) private var debridApiKey = ""
+    /// True while a torrent stream is being resolved through the debrid provider,
+    /// so the picker can keep its spinner up instead of appearing to hang.
+    @State private var isResolvingDebrid = false
 
     init(
         id: String,
@@ -118,11 +123,10 @@ struct DetailsScreen: View {
                         episode: pendingEpisode,
                         streams: viewModel.uiState.streams,
                         isLoading: viewModel.uiState.isLoadingStreams,
+                        includeDebrid: DebridResolver(store: ProfileSettings.current).isEnabled,
+                        isResolvingDebrid: isResolvingDebrid,
                         onSelect: { stream in
-                            if let url = stream.url {
-                                isStreamPickerPresented = false
-                                onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta))
-                            }
+                            playStream(stream, meta: meta)
                         },
                         onDismiss: {
                             isStreamPickerPresented = false
@@ -198,14 +202,43 @@ struct DetailsScreen: View {
             from: viewModel.uiState.streams,
             qualityPreference: smartStreamQuality,
             subtitleLanguages: subtitleLanguagePreferences,
-            shouldMatchSubtitles: smartSubtitleMatching
-        ), let url = stream.url {
+            shouldMatchSubtitles: smartSubtitleMatching,
+            includeDebrid: DebridResolver(store: ProfileSettings.current).isEnabled
+        ) {
             isSmartPlaybackPending = false
-            isStreamPickerPresented = false
-            onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta))
+            // Direct streams dismiss the picker immediately; debrid streams keep
+            // it up with a spinner until the link resolves (handled in playStream).
+            playStream(stream, meta: meta)
         } else {
             isSmartPlaybackPending = false
             isStreamPickerPresented = true
+        }
+    }
+
+    /// Plays a chosen stream. Direct URLs go straight to the player; torrent-only
+    /// streams are resolved through the configured debrid provider first, keeping
+    /// the picker's spinner up until a link comes back (or the attempt fails).
+    private func playStream(_ stream: NuvioStream, meta: NuvioMeta) {
+        if let url = stream.url, !url.isEmpty {
+            isStreamPickerPresented = false
+            onPlayClick(url, meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta))
+            return
+        }
+
+        guard stream.isDebridResolvable, !isResolvingDebrid else { return }
+        let season = pendingEpisode?.season
+        let episode = pendingEpisode?.episode
+        isResolvingDebrid = true
+        Task {
+            let result = await DebridResolver(store: ProfileSettings.current)
+                .resolvedURL(for: stream, season: season, episode: episode)
+            await MainActor.run {
+                isResolvingDebrid = false
+                if case let .success(url, _, _)? = result {
+                    isStreamPickerPresented = false
+                    onPlayClick(url.absoluteString, meta, pendingEpisodeSubtitle, stream.subtitles, pendingEpisode, orderedEpisodes(for: meta))
+                }
+            }
         }
     }
 
@@ -902,11 +935,17 @@ enum SmartPlaybackSelector {
         from streams: [NuvioStream],
         qualityPreference: String,
         subtitleLanguages: [String],
-        shouldMatchSubtitles: Bool
+        shouldMatchSubtitles: Bool,
+        includeDebrid: Bool = false
     ) -> NuvioStream? {
         let playable = streams.enumerated().compactMap { index, stream -> (index: Int, stream: NuvioStream)? in
-            guard let url = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty else { return nil }
-            return (index, stream)
+            if let url = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty {
+                return (index, stream)
+            }
+            // Torrent-only streams are candidates only when a debrid provider is
+            // configured to resolve them into a direct URL.
+            if includeDebrid, stream.isDebridResolvable { return (index, stream) }
+            return nil
         }
         let candidates = playable.filter { !isPromotionalStream($0.stream) }
         if qualityPreference == "Highest", let firstCandidate = (candidates.isEmpty ? playable : candidates).first {
@@ -925,10 +964,12 @@ enum SmartPlaybackSelector {
         }.first?.stream
     }
 
-    static func playableStreams(from streams: [NuvioStream]) -> [NuvioStream] {
+    static func playableStreams(from streams: [NuvioStream], includeDebrid: Bool = false) -> [NuvioStream] {
         let playable = streams.filter { stream in
-            guard let url = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
-            return !url.isEmpty
+            if let url = stream.url?.trimmingCharacters(in: .whitespacesAndNewlines), !url.isEmpty {
+                return true
+            }
+            return includeDebrid && stream.isDebridResolvable
         }
         let nonPromotional = playable.filter { !isPromotionalStream($0) }
         return nonPromotional.isEmpty ? playable : nonPromotional
@@ -2134,15 +2175,32 @@ private struct TvStreamLoadingOverlay: View {
     }
 }
 
+/// How the stream picker orders results. `.default` keeps the add-ons' own
+/// order (usually already best-first); the others re-rank across all sources.
+enum StreamSortOption: String, CaseIterable, Identifiable {
+    case `default` = "Default"
+    case quality = "Quality"
+    case size = "Size"
+    case name = "Name"
+
+    var id: String { rawValue }
+}
+
 private struct TvStreamPickerOverlay: View {
     let meta: NuvioMeta
     let episode: NuvioVideo?
     let streams: [NuvioStream]
     let isLoading: Bool
+    /// Whether torrent-only streams should be listed (a debrid provider is set).
+    let includeDebrid: Bool
+    /// A torrent stream is being turned into a playable link right now.
+    let isResolvingDebrid: Bool
     let onSelect: (NuvioStream) -> Void
     let onDismiss: () -> Void
 
     @State private var selectedAddonName: String?
+    @State private var sortOption: StreamSortOption = .default
+    @State private var showSortOptions = false
     // A single focus state for the whole picker (filter chips + stream cards),
     // keyed by string. Filter chips use the "filter::" prefix; stream cards use
     // their natural id. One shared state makes programmatic focus moves reliable
@@ -2150,6 +2208,7 @@ private struct TvStreamPickerOverlay: View {
     @FocusState private var focusedItem: String?
 
     private let filterAllKey = "filter::all"
+    private let sortKey = "filter::sort"
     private func filterKey(_ name: String) -> String { "filter::\(name)" }
 
     var body: some View {
@@ -2183,10 +2242,17 @@ private struct TvStreamPickerOverlay: View {
             // keeps real focus while it fades out, then its removal makes the
             // engine re-resolve and write nil into this binding, visibly
             // un-highlighting the first card. If focus ever evaporates while
-            // the picker is up, grab it again.
+            // the picker is up, grab it again — but only if it's *still* gone
+            // after a beat. A fast scroll blips `focusedItem` to nil between
+            // cards before landing on the next one; re-seeding on that blip
+            // snaps focus back to the first stream (the reported bug), so we
+            // debounce and bail when focus has already landed somewhere.
             .onChange(of: focusedItem) { newValue in
-                if newValue == nil {
-                    seedInitialFocus()
+                guard newValue == nil else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
+                    if focusedItem == nil {
+                        seedInitialFocus()
+                    }
                 }
             }
             .onExitCommand(perform: onDismiss)
@@ -2242,6 +2308,21 @@ private struct TvStreamPickerOverlay: View {
                     action: { selectedAddonName = addonName }
                 )
             }
+
+            Spacer(minLength: 0)
+
+            TvStreamFilterButton(
+                title: "Sort: \(sortOption.rawValue)",
+                isSelected: sortOption != .default,
+                focusBinding: $focusedItem,
+                focusValue: sortKey,
+                action: { showSortOptions = true }
+            )
+            .confirmationDialog("Sort streams by", isPresented: $showSortOptions, titleVisibility: .visible) {
+                ForEach(StreamSortOption.allCases) { option in
+                    Button(option.rawValue) { sortOption = option }
+                }
+            }
         }
         .focusSection()
     }
@@ -2284,6 +2365,22 @@ private struct TvStreamPickerOverlay: View {
                 }
                 .focusSection()
             }
+
+            // Torrent streams take a moment to cache/unrestrict on the debrid
+            // provider; cover the panel so it doesn't look frozen.
+            if isResolvingDebrid {
+                VStack(spacing: 24) {
+                    ProgressView()
+                        .progressViewStyle(CircularProgressViewStyle(tint: .white))
+                        .scaleEffect(1.6)
+
+                    Text("Preparing stream")
+                        .font(.system(size: 30, weight: .semibold))
+                        .foregroundColor(.white.opacity(0.74))
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color.black.opacity(0.55))
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .modifier(TvStreamGlass(shape: RoundedRectangle(cornerRadius: 32, style: .continuous), tint: Color.black.opacity(0.22)))
@@ -2297,12 +2394,74 @@ private struct TvStreamPickerOverlay: View {
     }
 
     private var playableStreams: [NuvioStream] {
-        SmartPlaybackSelector.playableStreams(from: streams)
+        SmartPlaybackSelector.playableStreams(from: streams, includeDebrid: includeDebrid)
     }
 
     private var filteredStreams: [NuvioStream] {
-        guard let selectedAddonName else { return playableStreams }
-        return playableStreams.filter { $0.addonName == selectedAddonName }
+        let base = selectedAddonName.map { name in
+            playableStreams.filter { $0.addonName == name }
+        } ?? playableStreams
+        return Self.sorted(base, by: sortOption)
+    }
+
+    /// Re-orders streams for the chosen sort. `.default` is a no-op so the
+    /// add-ons' own (usually best-first) order is preserved. `.enumerated` keeps
+    /// the sort stable, so streams that tie fall back to their original order.
+    private static func sorted(_ streams: [NuvioStream], by option: StreamSortOption) -> [NuvioStream] {
+        switch option {
+        case .default:
+            return streams
+        case .quality:
+            return streams.enumerated().sorted {
+                resolution(for: $0.element) != resolution(for: $1.element)
+                    ? resolution(for: $0.element) > resolution(for: $1.element)
+                    : $0.offset < $1.offset
+            }.map(\.element)
+        case .size:
+            return streams.enumerated().sorted {
+                sizeBytes(for: $0.element) != sizeBytes(for: $1.element)
+                    ? sizeBytes(for: $0.element) > sizeBytes(for: $1.element)
+                    : $0.offset < $1.offset
+            }.map(\.element)
+        case .name:
+            return streams.sorted {
+                ($0.name ?? "").localizedCaseInsensitiveCompare($1.name ?? "") == .orderedAscending
+            }
+        }
+    }
+
+    /// Best-effort resolution parsed from a stream's text (2160/1080/720/480),
+    /// 0 when unknown so untagged streams sink to the bottom of a Quality sort.
+    private static func resolution(for stream: NuvioStream) -> Int {
+        let text = "\(stream.name ?? "") \(stream.description ?? "")".lowercased()
+        if text.contains("2160") || text.contains("4k") || text.contains("uhd") { return 2160 }
+        if text.contains("1440") || text.contains("2k") { return 1440 }
+        if text.contains("1080") || text.contains("fhd") { return 1080 }
+        if text.contains("720") { return 720 }
+        if text.contains("480") { return 480 }
+        return 0
+    }
+
+    /// Best-effort file size in bytes parsed from a stream's text (e.g. "12.3 GB",
+    /// "📦 700 MB"). 0 when no size is present.
+    private static func sizeBytes(for stream: NuvioStream) -> Int64 {
+        let text = "\(stream.name ?? "") \(stream.description ?? "")"
+        let pattern = #"(\d+(?:[.,]\d+)?)\s*(TB|GB|MB|KB)"#
+        guard let match = text.range(of: pattern, options: [.regularExpression, .caseInsensitive]) else {
+            return 0
+        }
+        let token = String(text[match])
+        let number = token.replacingOccurrences(of: ",", with: ".")
+            .components(separatedBy: CharacterSet(charactersIn: "0123456789.").inverted)
+            .first { Double($0) != nil }
+            .flatMap(Double.init) ?? 0
+        let unit = token.uppercased()
+        let multiplier: Double
+        if unit.contains("TB") { multiplier = 1_099_511_627_776 }
+        else if unit.contains("GB") { multiplier = 1_073_741_824 }
+        else if unit.contains("MB") { multiplier = 1_048_576 }
+        else { multiplier = 1024 }
+        return Int64(number * multiplier)
     }
 
     private var filteredStreamIDs: [String] {
@@ -2418,9 +2577,7 @@ private struct TvStreamCard: View {
                 Spacer(minLength: 28)
 
                 VStack(spacing: 18) {
-                    Image(systemName: "triangle.lefthalf.filled")
-                        .font(.system(size: 78, weight: .bold))
-                        .foregroundColor(.white)
+                    addonLogo
 
                     if let addonName = stream.addonName {
                         Text(addonName)
@@ -2470,6 +2627,31 @@ private struct TvStreamCard: View {
     private var secondaryName: String? {
         let value = nameLines.dropFirst().joined(separator: " ")
         return value.isEmpty ? nil : value
+    }
+
+    /// The source add-on's real logo, falling back to a neutral stream glyph
+    /// (never a warning-looking one) while it loads or when the manifest has none.
+    @ViewBuilder
+    private var addonLogo: some View {
+        let fallback = Image(systemName: "play.tv.fill")
+            .font(.system(size: 62, weight: .semibold))
+            .foregroundColor(.white.opacity(0.9))
+
+        if let logo = stream.addonLogoURL, let url = URL(string: logo) {
+            AsyncImage(url: url) { phase in
+                switch phase {
+                case .success(let image):
+                    image.resizable().scaledToFit()
+                case .failure:
+                    fallback
+                default:
+                    ProgressView().tint(.white)
+                }
+            }
+            .frame(width: 96, height: 96)
+        } else {
+            fallback.frame(width: 96, height: 96)
+        }
     }
 }
 #endif

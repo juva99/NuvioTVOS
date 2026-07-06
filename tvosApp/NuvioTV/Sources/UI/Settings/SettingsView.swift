@@ -1412,7 +1412,7 @@ private struct PlaybackSettingsView: View {
             }
 
             SettingsGroup(title: "Audio & Subtitles", subtitle: "Language and subtitle rendering defaults") {
-                SettingsOptionRow(
+                SettingsChoiceRow(
                     title: "Preferred Audio",
                     subtitle: "Default audio language",
                     selection: $audioLanguage,
@@ -2998,6 +2998,56 @@ private struct SettingsOptionRow: View {
         guard !options.isEmpty else { return }
         let currentIndex = options.firstIndex(of: currentValue) ?? 0
         selection = options[(currentIndex + 1) % options.count]
+    }
+}
+
+/// Like `SettingsOptionRow` but presents all options in a dropdown-style picker
+/// (the app's confirmation-dialog pattern) instead of cycling one-by-one — nicer
+/// when a list has several entries, e.g. Preferred Audio.
+private struct SettingsChoiceRow: View {
+    let title: String
+    let subtitle: String
+    @Binding var selection: String
+    let options: [String]
+    let accentColor: Color
+
+    @FocusState private var isFocused: Bool
+    @State private var showOptions = false
+
+    var body: some View {
+        Button { showOptions = true } label: {
+            SettingsRowShell(isFocused: isFocused, accentColor: accentColor) {
+                SettingsRowText(title: title, subtitle: subtitle)
+
+                Spacer(minLength: 24)
+
+                HStack(spacing: 10) {
+                    Text(currentValue)
+                        .font(.system(size: 19, weight: .bold))
+                        .foregroundColor(.white)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.76)
+
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 17, weight: .bold))
+                        .foregroundColor(accentColor)
+                }
+                .frame(maxWidth: 260, alignment: .trailing)
+            }
+        }
+        .buttonStyle(PosterCardButtonStyle())
+        .focused($isFocused)
+        .focusEffectDisabledIfAvailable()
+        .entryLockable()
+        .confirmationDialog(title, isPresented: $showOptions, titleVisibility: .visible) {
+            ForEach(options, id: \.self) { option in
+                Button(option) { selection = option }
+            }
+        }
+    }
+
+    private var currentValue: String {
+        options.contains(selection) ? selection : (options.first ?? selection)
     }
 }
 

@@ -11,6 +11,7 @@ struct SearchView: View {
     @StateObject private var viewModel: SearchViewModel
     let showDiscover: Bool
     let onContentClick: (String, String) -> Void
+    var onLongPress: ((NuvioMeta) -> Void)? = nil
 
     @FocusState private var searchBarFocused: Bool
     @FocusState private var focusedResultID: String?
@@ -27,10 +28,11 @@ struct SearchView: View {
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
 
-    init(viewModel: SearchViewModel, showDiscover: Bool = true, onContentClick: @escaping (String, String) -> Void) {
+    init(viewModel: SearchViewModel, showDiscover: Bool = true, onContentClick: @escaping (String, String) -> Void, onLongPress: ((NuvioMeta) -> Void)? = nil) {
         _viewModel = StateObject(wrappedValue: viewModel)
         self.showDiscover = showDiscover
         self.onContentClick = onContentClick
+        self.onLongPress = onLongPress
     }
 
     var body: some View {
@@ -49,7 +51,7 @@ struct SearchView: View {
                         recentRow
                     }
                     if showDiscover {
-                        DiscoverSection(onContentClick: onContentClick)
+                        DiscoverSection(onContentClick: onContentClick, onLongPress: onLongPress)
                             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     } else {
                         centeredState {
@@ -216,7 +218,11 @@ struct SearchView: View {
         ScrollView {
             LazyVGrid(columns: gridColumns, alignment: .leading, spacing: SearchGridMetrics.posterGap) {
                 ForEach(viewModel.results) { item in
-                    SearchResultCard(meta: item, externalFocus: $focusedResultID) {
+                    SearchResultCard(
+                        meta: item,
+                        externalFocus: $focusedResultID,
+                        onLongPress: onLongPress.map { cb in { cb(item) } }
+                    ) {
                         onContentClick(item.id, item.type)
                     }
                     .disabled(overlayRestoreResultID != nil && overlayRestoreResultID != item.id)
@@ -315,6 +321,7 @@ struct SearchView: View {
 private struct SearchResultCard: View {
     let meta: NuvioMeta
     var externalFocus: FocusState<String?>.Binding? = nil
+    var onLongPress: (() -> Void)? = nil
     let action: () -> Void
     @FocusState private var focused: Bool
     @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
@@ -367,6 +374,9 @@ private struct SearchResultCard: View {
         .focused($focused)
         .modifier(ExternalFocusBinding(binding: externalFocus, id: meta.id))
         .focusEffectDisabledIfAvailable()
+        .simultaneousGesture(
+            LongPressGesture(minimumDuration: 0.45).onEnded { _ in onLongPress?() }
+        )
         .animation(smoothFocus ? .spring(response: 0.28, dampingFraction: 0.75) : nil, value: focused)
     }
 

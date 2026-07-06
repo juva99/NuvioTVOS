@@ -25,6 +25,7 @@ enum TVScreen {
     case main
     case details(id: String, type: String)
     case player(url: URL, meta: NuvioMeta, subtitle: String, externalSubtitles: [NuvioSubtitle], resumeFrom: Double?)
+    case cloudLibrary
 }
 
 enum TVTab: String, CaseIterable, Identifiable {
@@ -59,6 +60,9 @@ struct ContentView: View {
     /// player can offer/auto-play the next episode. Empty for movies/trailers.
     @State private var playbackEpisodes: [NuvioVideo] = []
     @State private var playbackCurrentEpisode: NuvioVideo?
+    /// Title whose liquid-glass quick-actions menu is showing (long-press on a
+    /// card). Presented as an overlay over the tab view, like Details/Player.
+    @State private var cardMenuMeta: NuvioMeta?
     @StateObject private var authManager = AuthManager()
     @StateObject private var profileViewModel = ProfileViewModel()
     @StateObject private var syncManager = NuvioSyncManager()
@@ -108,7 +112,7 @@ struct ContentView: View {
                         }
                 }
 
-            case .main, .details, .player:
+            case .main, .details, .player, .cloudLibrary:
                 // The tab view (Home included) stays mounted for the whole
                 // session; Details and Player are presented as overlays on TOP
                 // of it rather than replacing it. Returning therefore leaves
@@ -133,6 +137,7 @@ struct ContentView: View {
         // so this only kicks in for the in-between frames. No handler is attached
         // on Home, so Menu there keeps its normal tab-level behaviour.
         .onExitCommand(perform: isOverlayPresented ? dismissOverlay : nil)
+        .onOpenURL(perform: handleDeepLink)
         .onAppear {
             syncManager.attach(authManager: authManager, profileViewModel: profileViewModel)
             guard !resolvedInitialScreen else { return }
@@ -168,10 +173,19 @@ struct ContentView: View {
         }
     }
 
-    /// Whether Details or Player is currently covering the tab view.
+    /// Whether Details, Player, or the card quick-actions menu is currently
+    /// covering the tab view (drives `.disabled` and the Menu-button safety net).
     private var isOverlayPresented: Bool {
+        if cardMenuMeta != nil { return true }
+        return fullScreenOverlayPresented
+    }
+
+    /// Details/Player fully replace Home, so the tab view fades to black under
+    /// them. The card quick-actions menu is deliberately excluded — it keeps Home
+    /// visible behind its glass panel.
+    private var fullScreenOverlayPresented: Bool {
         switch activeScreen {
-        case .details, .player: return true
+        case .details, .player, .cloudLibrary: return true
         default: return false
         }
     }
@@ -181,6 +195,10 @@ struct ContentView: View {
     /// Used only by the root Menu-button safety net; changing `activeScreen`
     /// tears the overlay down, so Player's `onDisappear` cleanup still runs.
     private func dismissOverlay() {
+        if cardMenuMeta != nil {
+            withAnimation(.easeInOut(duration: 0.2)) { cardMenuMeta = nil }
+            return
+        }
         switch activeScreen {
         case .details:
             withAnimation(.easeInOut(duration: 0.24)) {
@@ -193,8 +211,32 @@ struct ContentView: View {
                     ? .details(id: meta.id, type: meta.type)
                     : .main
             }
+        case .cloudLibrary:
+            withAnimation(.easeInOut(duration: 0.24)) {
+                activeScreen = .main
+            }
         default:
             break
+        }
+    }
+
+    /// Handles `nuvio-tv://details?id=…&type=…` deep links (e.g. a Top Shelf card
+    /// tapped on the Apple TV home screen), opening the matching Details screen.
+    /// Ignored while the user is still on the login / profile gate.
+    private func handleDeepLink(_ url: URL) {
+        guard url.scheme == "nuvio-tv", url.host == "details",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+              let id = components.queryItems?.first(where: { $0.name == "id" })?.value, !id.isEmpty else {
+            return
+        }
+        let type = components.queryItems?.first(where: { $0.name == "type" })?.value ?? "movie"
+        switch activeScreen {
+        case .login, .profileSelection:
+            return
+        default:
+            withAnimation(.easeInOut(duration: 0.28)) {
+                activeScreen = .details(id: id, type: type)
+            }
         }
     }
 
@@ -286,7 +328,12 @@ struct ContentView: View {
                 // views are unfocusable, so fading the tab view out while it's
                 // covered keeps focus inside the overlay. It stays mounted, so
                 // Home's state and focus memory survive for the return trip.
-                .opacity(isOverlayPresented ? 0 : 1)
+                // The card quick-actions menu is the exception: it floats a
+                // liquid-glass panel *over* a still-visible Home, so the tab view
+                // stays on screen (fading it to black would leave the glass
+                // nothing to refract) — it's only `.disabled` so its cards can't
+                // steal focus, and the menu re-grabs focus if the engine drifts.
+                .opacity(fullScreenOverlayPresented ? 0 : 1)
 
             if case .details(let contentId, let contentType) = activeScreen {
                 detailsScreen(contentId: contentId, contentType: contentType)
@@ -304,6 +351,32 @@ struct ContentView: View {
                 )
                 .transition(.opacity)
                 .zIndex(2)
+            }
+
+            if case .cloudLibrary = activeScreen {
+                cloudLibraryScreen()
+                    .transition(.opacity)
+                    .zIndex(1)
+            }
+
+            if let menuMeta = cardMenuMeta {
+                CardActionMenuOverlay(
+                    meta: menuMeta,
+                    onDetails: {
+                        // Hand off to Details without a focus flash: the tab view
+                        // stays covered because activeScreen becomes .details in
+                        // the same transaction the menu clears.
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            cardMenuMeta = nil
+                            activeScreen = .details(id: menuMeta.id, type: menuMeta.type)
+                        }
+                    },
+                    onDismiss: {
+                        withAnimation(.easeInOut(duration: 0.2)) { cardMenuMeta = nil }
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(3)
             }
         }
     }
@@ -381,6 +454,16 @@ struct ContentView: View {
                         activeScreen = .details(id: item.meta.id, type: item.meta.type)
                     }
                 }
+            },
+            onLongPressCard: { meta in
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    cardMenuMeta = meta
+                }
+            },
+            onOpenCloudLibrary: {
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    activeScreen = .cloudLibrary
+                }
             }
         )
     }
@@ -403,6 +486,22 @@ struct ContentView: View {
                         resumeFrom: isTrailer ? nil : ContinueWatchingStore.item(for: meta.id)?.resumePosition
                     )
                 }
+            },
+            onBack: {
+                withAnimation(.easeInOut(duration: 0.24)) {
+                    activeScreen = .main
+                }
+            }
+        )
+    }
+
+    private func cloudLibraryScreen() -> some View {
+        CloudLibraryView(
+            store: ProfileSettings.store(for: profileViewModel.activeProfile?.id),
+            onPlay: { url, meta in
+                playbackEpisodes = []
+                playbackCurrentEpisode = nil
+                presentPlayback(url: url, meta: meta, subtitle: "", externalSubtitles: [], resumeFrom: nil)
             },
             onBack: {
                 withAnimation(.easeInOut(duration: 0.24)) {
@@ -444,15 +543,41 @@ struct ContentView: View {
             tertiary: store.string(forKey: SettingsKey.subtitleLanguageTertiary) ?? "None"
         )
 
+        let debrid = DebridResolver(store: store)
         let best = SmartPlaybackSelector.bestStream(
             from: streams,
             qualityPreference: quality,
             subtitleLanguages: languages,
-            shouldMatchSubtitles: matchSubtitles
-        ) ?? SmartPlaybackSelector.playableStreams(from: streams).first
+            shouldMatchSubtitles: matchSubtitles,
+            includeDebrid: debrid.isEnabled
+        ) ?? SmartPlaybackSelector.playableStreams(from: streams, includeDebrid: debrid.isEnabled).first
 
-        guard let best, let urlString = best.url, let url = URL(string: urlString) else { return nil }
+        guard let best else { return nil }
+
+        // Torrent-only streams (no direct URL) go through the debrid provider,
+        // which returns a cached, directly-playable link. Direct streams pass
+        // through untouched.
+        if best.isDebridResolvable {
+            let (season, episode) = Self.seasonEpisode(fromContentId: contentId)
+            guard case let .success(url, _, _)? = await debrid.resolvedURL(for: best, season: season, episode: episode) else {
+                return nil
+            }
+            return PreparedNextStream(url: url, subtitleLine: subtitleLine, subtitles: best.subtitles)
+        }
+
+        guard let urlString = best.url, let url = URL(string: urlString) else { return nil }
         return PreparedNextStream(url: url, subtitleLine: subtitleLine, subtitles: best.subtitles)
+    }
+
+    /// Parses the season/episode out of a Stremio series content id of the form
+    /// `tt1234567:2:5` (imdb-id : season : episode). Returns `(nil, nil)` for
+    /// movies or ids without the trailing numbers.
+    private static func seasonEpisode(fromContentId contentId: String) -> (season: Int?, episode: Int?) {
+        let parts = contentId.split(separator: ":", omittingEmptySubsequences: false).map(String.init)
+        guard parts.count >= 3, let season = Int(parts[parts.count - 2]), let episode = Int(parts[parts.count - 1]) else {
+            return (nil, nil)
+        }
+        return (season, episode)
     }
 
     @ViewBuilder
@@ -704,6 +829,8 @@ private struct TVMainTabView: View {
     let onSignOut: () -> Void
     let onNavigateToDetails: (String, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
+    let onLongPressCard: (NuvioMeta) -> Void
+    let onOpenCloudLibrary: () -> Void
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
     @AppStorage(SettingsKey.discoverLocation) private var discoverLocation = "Search"
@@ -766,7 +893,8 @@ private struct TVMainTabView: View {
                 store: homeStore,
                 repository: CinemetaCatalogRepository(),
                 onNavigateToDetails: onNavigateToDetails,
-                onResumePlayback: onResumePlayback
+                onResumePlayback: onResumePlayback,
+                onLongPressCard: onLongPressCard
             )
                 .tabItem {
                     Label(TVTab.home.rawValue, systemImage: TVTab.home.symbol)
@@ -776,14 +904,15 @@ private struct TVMainTabView: View {
             SearchView(
                 viewModel: searchViewModel,
                 showDiscover: discoverLocation == "Search",
-                onContentClick: onNavigateToDetails
+                onContentClick: onNavigateToDetails,
+                onLongPress: onLongPressCard
             )
                 .tabItem {
                     Label(TVTab.search.rawValue, systemImage: TVTab.search.symbol)
                 }
                 .tag(TVTab.search)
 
-            LibraryView(viewModel: libraryViewModel, onContentClick: onNavigateToDetails)
+            LibraryView(viewModel: libraryViewModel, onContentClick: onNavigateToDetails, onLongPress: onLongPressCard, onOpenCloudLibrary: onOpenCloudLibrary)
                 .tabItem {
                     Label(TVTab.library.rawValue, systemImage: TVTab.library.symbol)
                 }
@@ -1027,6 +1156,7 @@ struct TVHomeView: View {
     let repository: CatalogRepository
     let onNavigateToDetails: (String, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
+    var onLongPressCard: ((NuvioMeta) -> Void)? = nil
 
     @AppStorage(SettingsKey.amoled) private var amoled = false
     @AppStorage(SettingsKey.bodyColor) private var bodyColor = SettingsBackground.charcoal.rawValue
@@ -1183,7 +1313,8 @@ struct TVHomeView: View {
                                             } else {
                                                 onNavigateToDetails(meta.id, meta.type)
                                             }
-                                        }
+                                        },
+                                        onLongPress: onLongPressCard
                                     )
                                     .background(
                                         GeometryReader { rowGeo in
@@ -1893,6 +2024,7 @@ private struct TVCatalogRow: View {
     let onBlur: (NuvioMeta) -> Void
     let onApproachEnd: (NuvioMeta) -> Void
     let onSelect: (NuvioMeta) -> Void
+    var onLongPress: ((NuvioMeta) -> Void)? = nil
 
     // Index of the card whose leading edge is pinned under the title. Driven by
     // focus and intentionally NOT reset on blur, so the row keeps its position
@@ -1971,7 +2103,8 @@ private struct TVCatalogRow: View {
                             onBlur(blurred)
                         },
                         externalFocus: externalFocus,
-                        externalFocusValue: cardKey
+                        externalFocusValue: cardKey,
+                        onLongPress: onLongPress
                     ) {
                         onSelect(item)
                     }
@@ -2014,15 +2147,20 @@ private struct TVHeroMetaLine: View {
 
         let badge = meta.statusBadgeLabel
         let rating = meta.rating.map { String(format: "IMDb %.1f", $0) }
+        // Movies have no status badge, so their rating would sit alone on the
+        // second line; ride it on the primary line right after the date instead.
+        let isMovie = !meta.isSeries
+        let primaryValues = isMovie ? values + [rating].compactMap { $0 } : values
+        let showSecondLine = !isMovie && (badge != nil || rating != nil)
 
         VStack(alignment: .leading, spacing: 10) {
-            Text(values.joined(separator: "  •  "))
+            Text(primaryValues.joined(separator: "  •  "))
                 .font(.custom("Inter-SemiBold", size: 22))
                 .foregroundColor(.white.opacity(0.66))
                 .lineLimit(1)
 
             // Second line, like the Android hero: "[ONGOING] • IMDb 7.4".
-            if badge != nil || rating != nil {
+            if showSecondLine {
                 HStack(spacing: 14) {
                     if let badge {
                         Text(badge)

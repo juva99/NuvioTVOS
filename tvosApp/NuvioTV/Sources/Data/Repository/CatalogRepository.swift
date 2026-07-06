@@ -337,7 +337,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
             for addon in streamAddons {
                 let url = addon.streamURL(type: type, id: id)
                 let name = addon.name
-                group.addTask { await Self.fetchStreams(from: url, addonName: name) }
+                let manifestURL = addon.manifestURL
+                group.addTask { await Self.fetchStreams(from: url, addonName: name, manifestURL: manifestURL) }
             }
             for await streams in group {
                 addonStreams += streams
@@ -363,7 +364,8 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     for addon in addons {
                         let url = addon.streamURL(type: type, id: id)
                         let name = addon.name
-                        group.addTask { .streams(await Self.fetchStreams(from: url, addonName: name)) }
+                        let manifestURL = addon.manifestURL
+                        group.addTask { .streams(await Self.fetchStreams(from: url, addonName: name, manifestURL: manifestURL)) }
                     }
                     for addon in subtitleAddons {
                         let url = addon.subtitleURL(type: subtitleType, id: id)
@@ -413,6 +415,48 @@ final class CinemetaCatalogRepository: CatalogRepository {
             print("Failed to load streams from \(addonName): \(error.localizedDescription)")
             return []
         }
+    }
+
+    /// Fetches an add-on's streams and its manifest `logo` concurrently, then
+    /// tags the streams with the logo. Running them in parallel (and bounding the
+    /// logo fetch with a short timeout) means the cosmetic logo never delays the
+    /// streams themselves — important since stream loading is the critical path.
+    private static func fetchStreams(from url: URL, addonName: String, manifestURL: URL) async -> [NuvioStream] {
+        async let logo = addonLogo(for: manifestURL)
+        let streams = await fetchStreams(from: url, addonName: addonName)
+        guard let resolvedLogo = await logo else { return streams }
+        return streams.map { $0.withAddonLogoURL(resolvedLogo) }
+    }
+
+    /// One-time-per-manifest fetch of an add-on's `logo`, cached for the app's
+    /// lifetime so the stream picker can show each source's real branding. A
+    /// missing/failed logo caches `nil` so we don't refetch on every open. A tight
+    /// timeout keeps a slow manifest from ever holding up stream loading.
+    private static let addonLogoCacheLock = NSLock()
+    private static var addonLogoCache: [URL: String?] = [:]
+
+    private static func addonLogo(for manifestURL: URL) async -> String? {
+        addonLogoCacheLock.lock()
+        if let cached = addonLogoCache[manifestURL] {
+            addonLogoCacheLock.unlock()
+            return cached
+        }
+        addonLogoCacheLock.unlock()
+
+        var request = URLRequest(url: manifestURL)
+        request.timeoutInterval = 5
+
+        var logo: String?
+        if let (data, response) = try? await URLSession.shared.data(for: request),
+           let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode,
+           let manifest = try? JSONDecoder().decode(StremioManifestLogo.self, from: data) {
+            logo = manifest.logo?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        }
+
+        addonLogoCacheLock.lock()
+        addonLogoCache[manifestURL] = logo
+        addonLogoCacheLock.unlock()
+        return logo
     }
 
     private static func fetchSubtitles(from url: URL, source: String) async -> [NuvioSubtitle] {
@@ -770,9 +814,18 @@ private struct StremioStream: Decodable {
     let description: String?
     let subtitles: [StremioStreamSubtitle]?
     let behaviorHints: StremioStreamBehaviorHints?
+    /// Torrent fields used by debrid resolution. Add-ons like Torrentio return
+    /// these instead of a `url`; the debrid layer converts them to a link.
+    let infoHash: String?
+    let fileIdx: Int?
+    let sources: [String]?
 
     func toNuvioStream(addonName: String) -> NuvioStream? {
-        guard let streamURL = cleaned(url) ?? cleaned(externalUrl) else { return nil }
+        let streamURL = cleaned(url) ?? cleaned(externalUrl)
+        let hash = cleaned(infoHash)?.lowercased()
+        // Keep torrent-only streams (no URL but an info-hash) so debrid can
+        // resolve them later; drop only streams that have neither.
+        guard streamURL != nil || hash != nil else { return nil }
 
         let displayName = cleaned(name) ?? cleaned(title) ?? "Stream"
         var detailLines: [String] = []
@@ -791,7 +844,11 @@ private struct StremioStream: Decodable {
             name: displayName,
             description: detailLines.joined(separator: "\n"),
             addonName: addonName,
-            subtitles: subtitles?.compactMap { $0.toNuvioSubtitle(source: addonName) } ?? []
+            subtitles: subtitles?.compactMap { $0.toNuvioSubtitle(source: addonName) } ?? [],
+            infoHash: hash,
+            fileIdx: fileIdx,
+            sources: sources ?? [],
+            filename: cleaned(behaviorHints?.filename)
         )
     }
 
@@ -837,6 +894,17 @@ private struct StremioStreamSubtitle: Decodable {
 
 private struct StremioStreamBehaviorHints: Decodable {
     let videoSize: Int64?
+    let filename: String?
+    let bingeGroup: String?
+}
+
+/// Minimal manifest decode for just the add-on `logo` shown on stream cards.
+private struct StremioManifestLogo: Decodable {
+    let logo: String?
+}
+
+private extension String {
+    var nilIfEmpty: String? { isEmpty ? nil : self }
 }
 
 private extension String {
