@@ -25,17 +25,22 @@ The Apple TV build is published as a `.ipa` on the [Releases page](https://githu
 
 ## Latest tvOS Beta
 
-[Beta 2.4](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.4) is the current tvOS release. Download the unsigned IPA here:
+[Beta 2.5](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.5) is the current tvOS release. Download the unsigned IPA here:
 
-[NuvioTV-tvOS-beta-2.4.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.4/NuvioTV-tvOS-beta-2.4.ipa)
+[NuvioTV-tvOS-beta-2.5-unsigned.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.5/NuvioTV-tvOS-beta-2.5-unsigned.ipa)
 
-Beta 2.4 brings the fixes from the latest tvOS pass:
+Important: this IPA is unsigned because no tvOS signing identity is configured on this machine.
 
-- IntroDB skip intro and skip ending, including controller-aware hiding and focus fixes.
-- Repeat seeking with a configurable seek step, defaulting to 15 seconds.
-- Continue Watching keeps end-credit episodes and labels aired follow-ups as "New Episode".
-- Upcoming episodes can stay visible with their air date without becoming playable too early.
-- Trakt, avatar saving, Liquid Glass buttons, and subtitle preview polish are included in this build.
+Beta 2.5 brings the latest tvOS debrid and Apple TV integration pass:
+
+- Debrid stream resolving is wired for Real-Debrid, Premiumize, and TorBox.
+- Torrent-only streams can appear in the stream picker and resolve into playable links after a provider key is added in Settings.
+- Stream picker sorting, add-on logos, and focus stability have been improved.
+- Cloud Library is available from Library for Premiumize and TorBox accounts with an API key.
+- Apple TV Top Shelf mirrors Continue Watching and opens titles back into Nuvio.
+- Long-pressing poster, search, discover, and library cards opens quick actions.
+- Continue Watching now uses "Next Up" for ordinary next episodes and reserves "New Episode" for fresh drops.
+- Held Siri Remote seeking works better while the timeline is focused, and buffering is tuned for Stremio/debrid streams.
 
 ## About
 
@@ -49,7 +54,11 @@ The original shared mobile code is still present in [composeApp](./composeApp), 
 - Apple TV tab navigation for Profile, Home, Search, Library, and Settings.
 - Home rows for synced Nuvio collections and add-on catalog lists.
 - Cinemeta-backed catalog and metadata repository with Stremio-compatible stream/subtitle addon hooks.
-- User-configurable Stremio stream addon manifest URL in Settings → Integrations → Add-ons.
+- User-configurable Stremio stream add-ons in Settings → Integrations → Add-ons.
+- Debrid provider settings for Real-Debrid, Premiumize, and TorBox torrent stream resolution.
+- Premiumize and TorBox Cloud Library playback through the built-in player.
+- Apple TV Top Shelf extension backed by the active Continue Watching row.
+- Long-press quick actions for poster cards, including details, library toggle, and watched toggle.
 - QR-code and email login flow backed by Supabase configuration in [AuthConfig.swift](./tvosApp/NuvioTV/Sources/Core/Auth/AuthConfig.swift).
 - tvOS profile/account sync surfaces while the full shared account experience is being ported.
 - MPVKit-based player surface with tvOS remote input, skip controls, saved audio/subtitle selections, idle-timer handling, and resume support.
@@ -75,9 +84,9 @@ Known areas that still need work:
 - Library still needs more sorting/grouping validation and real-world testing.
 - Vertical and horizontal scrolling still need more tuning on real devices.
 - The current layout is using the modern view only. Grid view and the other layout settings from Android TV still need to be brought over.
-- IntroDB integration is needed.
-- Next episode controls inside the player are not available yet.
-- Trakt is not implemented yet.
+- AllDebrid and Debrid-Link are visible provider options, but resolver backends are not wired yet.
+- Cloud Library currently supports Premiumize and TorBox only.
+- Top Shelf, debrid resolving, and Cloud Library still need more real-device validation across accounts/providers.
 - If login still returns to the Apple TV Home screen on a real device, please send the device console or crash log.
 
 The Android TV version is the main UX reference for this port. Before changing navigation, focus behavior, scrolling, player controls, layout settings, or core interaction patterns, run the Android TV app in an emulator and feel how that version behaves. The tvOS version does not need to be a pixel-for-pixel clone, but it should preserve the things that make the Android TV app work well on a couch/remote interface.
@@ -148,6 +157,8 @@ tvosApp/NuvioTV/Sources/Core/Auth/AuthConfig.swift
 ```
 
 The catalog prototype currently uses Cinemeta plus Stremio-compatible stream and subtitle addon endpoints from [CatalogRepository.swift](./tvosApp/NuvioTV/Sources/Data/Repository/CatalogRepository.swift).
+
+For torrent stream resolving, open Settings → Integrations → Debrid, choose Real-Debrid, Premiumize, or TorBox, then enter that provider's API key. Premiumize and TorBox also unlock the Cloud Library button in Library.
 
 ## Tests
 
