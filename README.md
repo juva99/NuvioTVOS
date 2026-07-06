@@ -13,8 +13,8 @@
   </p>
 
   <p>
-    <a href="https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.4/NuvioTV-tvOS-beta-2.4.ipa">
-      <img src="https://img.shields.io/badge/Download%20.ipa-tvOS--beta--2.4-0A84FF?logo=apple&logoColor=white&style=for-the-badge" alt="Download NuvioTV tvOS Beta 2.4 .ipa" />
+    <a href="https://github.com/bobsupra/NuvioTVOS/releases/latest">
+      <img src="https://img.shields.io/github/v/release/bobsupra/NuvioTVOS?include_prereleases&sort=date&label=Download%20.ipa&logo=apple&logoColor=white&color=0A84FF&style=for-the-badge" alt="Download the latest tvOS .ipa" />
     </a>
   </p>
 
@@ -25,7 +25,9 @@ The Apple TV build is published as a `.ipa` on the [Releases page](https://githu
 
 ## Latest tvOS Beta
 
-[Beta 2.4](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.4) is the current tvOS release.
+[Beta 2.4](https://github.com/bobsupra/NuvioTVOS/releases/tag/tvos-beta-2.4) is the current tvOS release. Download the unsigned IPA here:
+
+[NuvioTV-tvOS-beta-2.4.ipa](https://github.com/bobsupra/NuvioTVOS/releases/download/tvos-beta-2.4/NuvioTV-tvOS-beta-2.4.ipa)
 
 Beta 2.4 brings the fixes from the latest tvOS pass:
 
