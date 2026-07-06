@@ -88,13 +88,13 @@ struct ContentView: View {
                 .transition(.opacity)
 
             case .profileSelection:
-                if awaitingPostLoginSync && syncManager.isPullingAccountProfiles {
+                if awaitingPostLoginSync && syncManager.isWaitingForAccountProfiles {
                     AccountSyncWaitView()
                         .transition(.opacity)
                         // Escape hatch: never trap the user here if the pull
                         // stalls (dead network, server hiccup).
                         .task {
-                            try? await Task.sleep(nanoseconds: 20_000_000_000)
+                            try? await Task.sleep(nanoseconds: 75_000_000_000)
                             withAnimation(.easeInOut(duration: 0.28)) {
                                 awaitingPostLoginSync = false
                             }
@@ -162,7 +162,18 @@ struct ContentView: View {
             syncManager.authStateChanged(state)
         }
         .onReceive(syncManager.$isPullingAccountProfiles) { pulling in
-            if !pulling, awaitingPostLoginSync {
+            if !pulling, !syncManager.isBackfillingAccountProfiles, awaitingPostLoginSync {
+                profileViewModel.loadProfiles()
+                profileViewModel.loadActiveProfile()
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    awaitingPostLoginSync = false
+                }
+            }
+        }
+        .onReceive(syncManager.$isBackfillingAccountProfiles) { backfilling in
+            if !backfilling, !syncManager.isPullingAccountProfiles, awaitingPostLoginSync {
+                profileViewModel.loadProfiles()
+                profileViewModel.loadActiveProfile()
                 withAnimation(.easeInOut(duration: 0.28)) {
                     awaitingPostLoginSync = false
                 }

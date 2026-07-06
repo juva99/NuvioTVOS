@@ -22,6 +22,11 @@ final class NuvioSyncManager: ObservableObject {
     /// pull fails), so the who's-watching screen can wait for real profile
     /// names instead of rendering local stubs.
     @Published private(set) var isPullingAccountProfiles = false
+    @Published private(set) var isBackfillingAccountProfiles = false
+
+    var isWaitingForAccountProfiles: Bool {
+        isPullingAccountProfiles || isBackfillingAccountProfiles
+    }
 
     private let client = SupabaseSyncClient()
 
@@ -119,6 +124,7 @@ final class NuvioSyncManager: ObservableObject {
             completedInitialPullKeys.removeAll()
             observedActiveProfileId = nil
             isPullingAccountProfiles = false
+            isBackfillingAccountProfiles = false
         case .loading:
             break
         }
@@ -205,6 +211,7 @@ final class NuvioSyncManager: ObservableObject {
                 isApplyingRemote = false
                 // Real profiles are in — no need for any in-flight backfill.
                 profileBackfillTask?.cancel()
+                isBackfillingAccountProfiles = false
             } else if profileViewModel.profiles.contains(where: { !Self.isPlaceholderProfile($0) }) {
                 // Seed the account only with profiles the user actually made.
                 // Pushing the untouched "Nuvio Guest" seed here would rename
@@ -376,14 +383,20 @@ final class NuvioSyncManager: ObservableObject {
     /// visible change.
     private func startProfileBackfill() {
         profileBackfillTask?.cancel()
+        isBackfillingAccountProfiles = true
         print("Nuvio sync starting profile backfill (post-login read yielded no profiles).")
         profileBackfillTask = Task { @MainActor [weak self] in
+            defer { self?.isBackfillingAccountProfiles = false }
             // Backoff between attempts (seconds); spans ~55s so a slow backend
             // that only makes a fresh account's profiles readable well after
             // the token is issued still gets caught.
             let delays: [UInt64] = [2, 3, 4, 6, 8, 10, 10, 12]
             for seconds in delays {
-                try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                do {
+                    try await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+                } catch {
+                    return
+                }
                 guard let self else { return }
                 guard (try? self.ensureStillSyncing()) != nil else { return }
                 guard let authManager = self.authManager,
