@@ -103,6 +103,7 @@ struct ContentView: View {
                     ProfileSelectionSyncView()
                         .transition(.opacity)
                         .task {
+                            try? await Task.sleep(nanoseconds: 450_000_000)
                             syncManager.refreshProfileSelectionIfNeeded()
                         }
                 } else {

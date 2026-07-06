@@ -137,7 +137,7 @@ final class NuvioSyncManager: ObservableObject {
     func shouldShowProfileSelectionLoading(for profiles: [Profile]) -> Bool {
         guard AuthConfig.isConfigured, authManager?.isAuthenticated == true else { return false }
         guard profiles.isEmpty || profiles.allSatisfy(Self.isPlaceholderProfile) else { return false }
-        return isPullingAccountProfiles || isBackfillingAccountProfiles || !didFinishAccountProfileRefresh
+        return !isPullingAccountProfiles && !didFinishAccountProfileRefresh
     }
 
     func refreshProfileSelectionIfNeeded() {
@@ -147,8 +147,12 @@ final class NuvioSyncManager: ObservableObject {
             didFinishAccountProfileRefresh = true
             return
         }
-        guard !isPullingAccountProfiles, !isBackfillingAccountProfiles else { return }
-        startProfileBackfill()
+        profileBackfillTask?.cancel()
+        profileBackfillGeneration += 1
+        isBackfillingAccountProfiles = false
+        profileViewModel.loadProfiles()
+        profileViewModel.loadActiveProfile()
+        didFinishAccountProfileRefresh = true
     }
 
     func activeProfileChanged(_ profile: Profile?) {
