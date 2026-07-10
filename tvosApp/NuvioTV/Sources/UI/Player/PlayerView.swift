@@ -1,5 +1,171 @@
 import SwiftUI
 import UIKit
+import AVKit
+import KSPlayer
+
+struct RoutedPlayerView: View {
+    let preferredEngine: PlayerEngine
+    let url: URL
+    let meta: NuvioMeta
+    let subtitle: String
+    let externalSubtitles: [NuvioSubtitle]
+    let resumeFrom: Double?
+    var episodes: [NuvioVideo] = []
+    var currentEpisode: NuvioVideo? = nil
+    var autoPlayNextEnabled: Bool = true
+    var resolveNextStream: ((NuvioVideo) async -> PreparedNextStream?)? = nil
+    var reloadCurrentStream: (() async -> PreparedNextStream?)? = nil
+    var onFinished: (() -> Void)? = nil
+    var onBack: () -> Void
+
+    @State private var activeEngine: PlayerEngine
+
+    init(
+        preferredEngine: PlayerEngine,
+        url: URL,
+        meta: NuvioMeta,
+        subtitle: String,
+        externalSubtitles: [NuvioSubtitle],
+        resumeFrom: Double?,
+        episodes: [NuvioVideo] = [],
+        currentEpisode: NuvioVideo? = nil,
+        autoPlayNextEnabled: Bool = true,
+        resolveNextStream: ((NuvioVideo) async -> PreparedNextStream?)? = nil,
+        reloadCurrentStream: (() async -> PreparedNextStream?)? = nil,
+        onFinished: (() -> Void)? = nil,
+        onBack: @escaping () -> Void
+    ) {
+        self.preferredEngine = preferredEngine
+        self.url = url
+        self.meta = meta
+        self.subtitle = subtitle
+        self.externalSubtitles = externalSubtitles
+        self.resumeFrom = resumeFrom
+        self.episodes = episodes
+        self.currentEpisode = currentEpisode
+        self.autoPlayNextEnabled = autoPlayNextEnabled
+        self.resolveNextStream = resolveNextStream
+        self.reloadCurrentStream = reloadCurrentStream
+        self.onFinished = onFinished
+        self.onBack = onBack
+        _activeEngine = State(initialValue: preferredEngine)
+    }
+
+    var body: some View {
+        Group {
+            if activeEngine == .ksPlayer {
+                KSNativePlayerView(
+                    url: url,
+                    resumeFrom: resumeFrom,
+                    onFailure: { activeEngine = .mpvKit },
+                    onFinished: onFinished ?? onBack
+                )
+                .onExitCommand(perform: onBack)
+            } else {
+                PlayerView(
+                    url: url,
+                    meta: meta,
+                    subtitle: subtitle,
+                    externalSubtitles: externalSubtitles,
+                    resumeFrom: resumeFrom,
+                    episodes: episodes,
+                    currentEpisode: currentEpisode,
+                    autoPlayNextEnabled: autoPlayNextEnabled,
+                    resolveNextStream: resolveNextStream,
+                    reloadCurrentStream: reloadCurrentStream,
+                    onFinished: onFinished,
+                    onBack: onBack
+                )
+            }
+        }
+    }
+}
+
+private struct KSNativePlayerView: UIViewControllerRepresentable {
+    let url: URL
+    let resumeFrom: Double?
+    let onFailure: () -> Void
+    let onFinished: (() -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFailure: onFailure, onFinished: onFinished)
+    }
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let options = KSOptions()
+        options.isAutoPlay = true
+        let player = KSAVPlayer(url: url, options: options)
+        let controller = AVPlayerViewController()
+        controller.player = player.player
+        controller.showsPlaybackControls = true
+        context.coordinator.start(player: player, resumeFrom: resumeFrom)
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
+
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {
+        coordinator.shutdown()
+        controller.player = nil
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        private var ksPlayer: KSAVPlayer?
+        private var statusTimer: Timer?
+        private var endObserver: NSObjectProtocol?
+        private var didStart = false
+        private let onFailure: () -> Void
+        private let onFinished: (() -> Void)?
+
+        init(onFailure: @escaping () -> Void, onFinished: (() -> Void)?) {
+            self.onFailure = onFailure
+            self.onFinished = onFinished
+        }
+
+        func start(player: KSAVPlayer, resumeFrom: Double?) {
+            ksPlayer = player
+            statusTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self, weak player] timer in
+                guard let self, let player, let item = player.player.currentItem else { return }
+                switch item.status {
+                case .readyToPlay:
+                    guard !self.didStart else { return }
+                    self.didStart = true
+                    if let resumeFrom, resumeFrom > 0 {
+                        player.currentPlaybackTime = resumeFrom
+                    }
+                    player.play()
+                case .failed:
+                    timer.invalidate()
+                    self.onFailure()
+                default:
+                    break
+                }
+            }
+            endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in self?.onFinished?() }
+            player.prepareToPlay()
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self, weak player] in
+                guard let self, let player, !self.didStart,
+                      player.player.currentItem?.status != .readyToPlay else { return }
+                self.onFailure()
+            }
+        }
+
+        func shutdown() {
+            statusTimer?.invalidate()
+            statusTimer = nil
+            if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+            endObserver = nil
+            ksPlayer?.shutdown()
+            ksPlayer = nil
+        }
+    }
+}
 
 struct PlayerView: View {
     @StateObject private var viewModel = PlayerViewModel()

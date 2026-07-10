@@ -1,5 +1,21 @@
 import Foundation
 
+enum PlayerEngine: String, CaseIterable {
+    case auto = "Auto"
+    case ksPlayer = "KSPlayer"
+    case mpvKit = "MPVKit"
+
+    static func from(_ value: String?) -> PlayerEngine {
+        if value == "AVPlayer" { return .ksPlayer }
+        return value.flatMap(PlayerEngine.init(rawValue:)) ?? .auto
+    }
+
+    func resolved(for meta: NuvioMeta, isTrailer: Bool) -> PlayerEngine {
+        guard self == .auto else { return self }
+        return isTrailer || meta.isAnime ? .mpvKit : .ksPlayer
+    }
+}
+
 enum PlayerStatus: Equatable {
     case idle
     case buffering

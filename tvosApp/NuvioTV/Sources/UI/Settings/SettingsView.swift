@@ -1505,7 +1505,7 @@ private struct PlaybackSettingsView: View {
     @AppStorage(SettingsKey.frameRateMatching) private var frameRateMatching = "Off"
     @AppStorage(SettingsKey.networkCache) private var networkCache = "Auto"
 
-    private let engines = ["Auto", "AVPlayer", "MPVKit"]
+    private let engines = PlayerEngine.allCases.map(\.rawValue)
     private let externalPlayers = ExternalPlayer.settingsOptions
     private let streamQualities = ["Highest", "4K", "1080p", "720p", "Smallest"]
     private let languages = ["System", "English", "Arabic", "Norwegian", "Spanish", "French", "German", "Japanese"]
@@ -1517,7 +1517,7 @@ private struct PlaybackSettingsView: View {
             SettingsGroup(title: "Player", subtitle: "Playback engine and episode flow") {
                 SettingsOptionRow(
                     title: "Player Engine",
-                    subtitle: "Preferred internal playback path",
+                    subtitle: "Auto uses KSPlayer for regular titles and MPVKit for anime or incompatible streams",
                     selection: $playerEngine,
                     options: engines,
                     accentColor: accentColor

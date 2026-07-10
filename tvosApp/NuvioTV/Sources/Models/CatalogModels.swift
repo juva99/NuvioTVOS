@@ -66,6 +66,17 @@ struct NuvioMeta: Identifiable, Codable {
     let trailerYtIds: [String]?
 
     var isSeries: Bool { type == "series" }
+    var isAnime: Bool {
+        let normalizedId = id.lowercased()
+        if ["kitsu:", "anilist:", "anidb:", "mal:", "anime:"].contains(where: normalizedId.hasPrefix) {
+            return true
+        }
+        if genres?.contains(where: { $0.caseInsensitiveCompare("Anime") == .orderedSame }) == true {
+            return true
+        }
+        return country?.localizedCaseInsensitiveContains("Japan") == true &&
+            genres?.contains(where: { $0.caseInsensitiveCompare("Animation") == .orderedSame }) == true
+    }
 
     /// Series status badge text ("ONGOING" / "ENDED"); nil for movies or
     /// when Cinemeta didn't provide a status. Shared by the details header

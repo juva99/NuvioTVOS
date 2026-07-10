@@ -623,7 +623,10 @@ struct ContentView: View {
         let isTrailer = subtitle == PlaybackMarkers.trailerSubtitle
         let store = ProfileSettings.store(for: profileViewModel.activeProfile?.id)
         let autoPlayNext = store.object(forKey: SettingsKey.autoPlayNext) as? Bool ?? true
-        PlayerView(
+        let configuredEngine = PlayerEngine.from(store.string(forKey: SettingsKey.playerEngine))
+        let engine = configuredEngine.resolved(for: meta, isTrailer: isTrailer)
+        RoutedPlayerView(
+            preferredEngine: engine,
             url: url,
             meta: meta,
             subtitle: subtitle,

@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		7397CF462F80FE3A00AC0F84 /* MPVKit in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D4E5F6A7B8C9D0E1F2 /* MPVKit */; };
+		7397CF472F80FE3A00AC0F85 /* KSPlayer in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D4E5F6A7B8C9D0E1F3 /* KSPlayer */; };
 		0B5F05C3171C7AB141FBE349 /* Pods_NuvioTV.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 049C9E9452E6B80AE60A799B /* Pods_NuvioTV.framework */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
@@ -183,6 +184,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				7397CF462F80FE3A00AC0F84 /* MPVKit in Frameworks */,
+				7397CF472F80FE3A00AC0F85 /* KSPlayer in Frameworks */,
 				0B5F05C3171C7AB141FBE349 /* Pods_NuvioTV.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -374,6 +376,7 @@
 			name = NuvioTV;
 			packageProductDependencies = (
 				A1B2C3D4E5F6A7B8C9D0E1F2 /* MPVKit */,
+				A1B2C3D4E5F6A7B8C9D0E1F3 /* KSPlayer */,
 			);
 			productName = NuvioTV;
 			productReference = 13B07F961A680F5B00A75B9A /* NuvioTV.app */;
@@ -423,6 +426,7 @@
 			mainGroup = 83CBB9F61A601CBA00E9B192;
 			packageReferences = (
 				F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../MPVKit" */,
+				F1E2D3C4B5A6F7E8D9C0B1A3 /* XCRemoteSwiftPackageReference "KSPlayer" */,
 			);
 			productRefGroup = 83CBBA001A601CBA00E9B192 /* Products */;
 			projectDirPath = "";
@@ -829,11 +833,27 @@
 		};
 /* End XCLocalSwiftPackageReference section */
 
+/* Begin XCRemoteSwiftPackageReference section */
+		F1E2D3C4B5A6F7E8D9C0B1A3 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
+			requirement = {
+				kind = exactVersion;
+				version = 2.3.4;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
 /* Begin XCSwiftPackageProductDependency section */
 		A1B2C3D4E5F6A7B8C9D0E1F2 /* MPVKit */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../MPVKit" */;
 			productName = MPVKit;
+		};
+		A1B2C3D4E5F6A7B8C9D0E1F3 /* KSPlayer */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = F1E2D3C4B5A6F7E8D9C0B1A3 /* XCRemoteSwiftPackageReference "KSPlayer" */;
+			productName = KSPlayer;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
