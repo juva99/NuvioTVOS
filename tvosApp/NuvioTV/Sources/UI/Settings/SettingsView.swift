@@ -999,6 +999,7 @@ private struct IntegrationSettingsView: View {
     @AppStorage(SettingsKey.mdbListApiKey) private var mdbListApiKey = ""
     @AppStorage(SettingsKey.debridProvider) private var debridProvider = "None"
     @AppStorage(SettingsKey.debridApiKey) private var debridApiKey = ""
+    @State private var isTorboxAuthPresented = false
 
     private let debridProviders = ["None", "Real-Debrid", "AllDebrid", "Premiumize", "Debrid-Link", "TorBox"]
 
@@ -1051,19 +1052,177 @@ private struct IntegrationSettingsView: View {
                     accentColor: accentColor
                 )
 
-                SettingsTextFieldRow(
-                    title: "API Key",
-                    subtitle: "Stored locally on this Apple TV",
-                    placeholder: "Not set",
-                    text: $debridApiKey,
-                    isSecure: true
-                )
-                .opacity(debridProvider == "None" ? 0.46 : 1)
-                .disabled(debridProvider == "None")
+                if debridProvider == "TorBox" {
+                    SettingsActionRow(
+                        title: debridApiKey.isEmpty ? "Connect TorBox" : "TorBox Connected",
+                        subtitle: debridApiKey.isEmpty
+                            ? "Scan a QR code to authorize this Apple TV"
+                            : "Manage the TorBox account connected to this profile",
+                        value: debridApiKey.isEmpty ? "Connect" : "Connected",
+                        accentColor: accentColor
+                    ) {
+                        isTorboxAuthPresented = true
+                    }
+                } else {
+                    SettingsTextFieldRow(
+                        title: "API Key",
+                        subtitle: "Stored locally on this Apple TV",
+                        placeholder: "Not set",
+                        text: $debridApiKey,
+                        isSecure: true
+                    )
+                    .opacity(debridProvider == "None" ? 0.46 : 1)
+                    .disabled(debridProvider == "None")
+                }
             }
         }
         .onAppear { traktViewModel.reload() }
+        .onChange(of: debridProvider) { _ in
+            // This settings model stores one credential for the selected provider.
+            debridApiKey = ""
+        }
         .task { traktViewModel.fetchAccountConnection(auto: true) }
+        .sheet(isPresented: $isTorboxAuthPresented) {
+            TorboxDeviceAuthView(
+                apiKey: $debridApiKey,
+                isPresented: $isTorboxAuthPresented,
+                accentColor: accentColor
+            )
+        }
+    }
+}
+
+private struct TorboxDeviceAuthView: View {
+    @Binding var apiKey: String
+    @Binding var isPresented: Bool
+    let accentColor: Color
+
+    @StateObject private var viewModel = TorboxDeviceAuthViewModel()
+
+    private var isConnected: Bool {
+        !apiKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    var body: some View {
+        ZStack {
+            Color.nuvioBackground(amoled: true).ignoresSafeArea()
+
+            VStack(spacing: 26) {
+                Text(isConnected ? "TorBox Connected" : "Connect TorBox")
+                    .font(.system(size: 42, weight: .bold))
+                    .foregroundColor(.white)
+
+                if isConnected {
+                    connectedContent
+                } else {
+                    authorizationContent
+                }
+            }
+            .padding(56)
+            .frame(maxWidth: 760)
+        }
+        .onAppear {
+            guard !isConnected else { return }
+            beginAuthorization()
+        }
+        .onDisappear { viewModel.cancel() }
+    }
+
+    private var connectedContent: some View {
+        VStack(spacing: 22) {
+            Image(systemName: "checkmark.circle.fill")
+                .font(.system(size: 76, weight: .semibold))
+                .foregroundColor(accentColor)
+
+            Text("TorBox is authorized on this Apple TV. TB Instant and your TorBox cloud library are ready to use.")
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(.white.opacity(0.68))
+                .multilineTextAlignment(.center)
+
+            HStack(spacing: 18) {
+                dialogButton("Close") { isPresented = false }
+                dialogButton("Disconnect", destructive: true) {
+                    apiKey = ""
+                    isPresented = false
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var authorizationContent: some View {
+        if viewModel.isStarting {
+            ProgressView("Starting secure sign in...")
+                .font(.system(size: 22, weight: .medium))
+                .foregroundColor(.white.opacity(0.72))
+        } else if let authorization = viewModel.authorization {
+            VStack(spacing: 20) {
+                Text("Scan the QR code and enter this code to approve Nuvio.")
+                    .font(.system(size: 22, weight: .medium))
+                    .foregroundColor(.white.opacity(0.68))
+                    .multilineTextAlignment(.center)
+
+                if let image = QRCode.image(from: authorization.friendlyVerificationURL, scale: 10) {
+                    Image(uiImage: image)
+                        .interpolation(.none)
+                        .resizable()
+                        .frame(width: 250, height: 250)
+                        .padding(14)
+                        .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                }
+
+                Text(authorization.userCode)
+                    .font(.system(size: 46, weight: .black, design: .monospaced))
+                    .tracking(5)
+                    .foregroundColor(accentColor)
+
+                Text(authorization.friendlyVerificationURL)
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundColor(.white.opacity(0.52))
+                    .lineLimit(1)
+
+                if let statusMessage = viewModel.statusMessage {
+                    HStack(spacing: 12) {
+                        if viewModel.isPolling { ProgressView() }
+                        Text(statusMessage)
+                    }
+                    .font(.system(size: 19, weight: .medium))
+                    .foregroundColor(.white.opacity(0.68))
+                }
+
+                dialogButton("Cancel") { isPresented = false }
+            }
+        } else {
+            VStack(spacing: 22) {
+                Text(viewModel.errorMessage ?? "Could not start TorBox sign in.")
+                    .font(.system(size: 21, weight: .semibold))
+                    .foregroundColor(Color(red: 1.0, green: 0.43, blue: 0.43))
+                    .multilineTextAlignment(.center)
+
+                HStack(spacing: 18) {
+                    dialogButton("Cancel") { isPresented = false }
+                    dialogButton("Retry") { beginAuthorization() }
+                }
+            }
+        }
+    }
+
+    private func beginAuthorization() {
+        viewModel.start { token in
+            apiKey = token
+        }
+    }
+
+    private func dialogButton(_ title: String, destructive: Bool = false, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 21, weight: .bold))
+                .foregroundColor(destructive ? Color(red: 1.0, green: 0.43, blue: 0.43) : .white)
+                .padding(.horizontal, 30)
+                .frame(height: 58)
+                .background(Color.white.opacity(0.10), in: Capsule())
+        }
+        .buttonStyle(PosterCardButtonStyle())
     }
 }
 

@@ -71,6 +71,7 @@
 		C0D310380000000000000038 /* CloudLibraryView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D300380000000000000038 /* CloudLibraryView.swift */; };
 		C0D310390000000000000039 /* TopShelfFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D300390000000000000039 /* TopShelfFeed.swift */; };
 		C0D3103A000000000000003A /* TorboxInstantService.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3003A000000000000003A /* TorboxInstantService.swift */; };
+		C0D3103B000000000000003B /* TorboxDeviceAuth.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D3003B000000000000003B /* TorboxDeviceAuth.swift */; };
 		7E51000000000000000000B1 /* TopShelf.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = 7E51000000000000000000A1 /* TopShelf.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		7E51000000000000000000B2 /* TopShelfContentProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E51000000000000000000A2 /* TopShelfContentProvider.swift */; };
 		7E51000000000000000000B3 /* TopShelfFeed.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0D300390000000000000039 /* TopShelfFeed.swift */; };
@@ -169,6 +170,7 @@
 		C0D300380000000000000038 /* CloudLibraryView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/UI/Cloud/CloudLibraryView.swift; sourceTree = "<group>"; };
 		C0D300390000000000000039 /* TopShelfFeed.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/Core/TopShelf/TopShelfFeed.swift; sourceTree = "<group>"; };
 		C0D3003A000000000000003A /* TorboxInstantService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/Core/Debrid/TorboxInstantService.swift; sourceTree = "<group>"; };
+		C0D3003B000000000000003B /* TorboxDeviceAuth.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NuvioTV/Sources/Core/Debrid/TorboxDeviceAuth.swift; sourceTree = "<group>"; };
 		7E51000000000000000000A1 /* TopShelf.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = TopShelf.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 		7E51000000000000000000A2 /* TopShelfContentProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TopShelf/TopShelfContentProvider.swift; sourceTree = "<group>"; };
 		7E51000000000000000000A3 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = TopShelf/Info.plist; sourceTree = "<group>"; };
@@ -269,6 +271,7 @@
 				C0D300310000000000000031 /* PremiumizeResolver.swift */,
 				C0D300320000000000000032 /* TorboxResolver.swift */,
 				C0D3003A000000000000003A /* TorboxInstantService.swift */,
+				C0D3003B000000000000003B /* TorboxDeviceAuth.swift */,
 				C0D300330000000000000033 /* CloudLibraryModels.swift */,
 				C0D300340000000000000034 /* PremiumizeCloudLibrary.swift */,
 				C0D300350000000000000035 /* TorboxCloudLibrary.swift */,
@@ -529,6 +532,7 @@
 				C0D310310000000000000031 /* PremiumizeResolver.swift in Sources */,
 				C0D310320000000000000032 /* TorboxResolver.swift in Sources */,
 				C0D3103A000000000000003A /* TorboxInstantService.swift in Sources */,
+				C0D3103B000000000000003B /* TorboxDeviceAuth.swift in Sources */,
 				C0D310330000000000000033 /* CloudLibraryModels.swift in Sources */,
 				C0D310340000000000000034 /* PremiumizeCloudLibrary.swift in Sources */,
 				C0D310350000000000000035 /* TorboxCloudLibrary.swift in Sources */,
