@@ -845,17 +845,7 @@ private struct TVMainTabView: View {
     }
 
     var body: some View {
-        // `tabViewSidebarHeader` is tvOS 27-only on tvOS, so the styled
-        // avatar+name header only renders there. No public device ships tvOS 27
-        // yet (as of mid-2026), so on every shipping device we fall back to the
-        // profile tab below, whose label carries the profile name + avatar icon.
-        if #available(tvOS 27.0, *) {
-            tabs
-                .tabViewStyle(.sidebarAdaptable)
-                .tabViewSidebarHeader {
-                    TVSidebarProfileHeader(profile: isAuthenticated ? activeProfile : nil, action: onSwitchProfile)
-                }
-        } else if #available(tvOS 18.0, *) {
+        if #available(tvOS 18.0, *) {
             tabs
                 .tabViewStyle(.sidebarAdaptable)
         } else {
