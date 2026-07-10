@@ -312,7 +312,7 @@ struct PosterCard: View {
             case .landscape, .square: return homeLayout == "Compact" ? 170 : 210
             }
         }
-        isLandscape ? 315 : (homeLayout == "Compact" ? 255 : 315)
+        return isLandscape ? 315 : (homeLayout == "Compact" ? 255 : 315)
     }
 
     private var totalCardHeight: CGFloat {
