@@ -35,6 +35,12 @@ jobs:
         working-directory: tvosApp
         run: pod install
 
+      - name: Configure released MPVKit binaries
+        run: |
+          curl --fail --location --retry 3 \
+            --output MPVKit/Package.swift \
+            https://raw.githubusercontent.com/mpvkit/MPVKit/0.41.0/Package.swift
+
       - name: Build tvOS app
         working-directory: tvosApp
         run: |
