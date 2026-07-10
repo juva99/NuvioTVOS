@@ -117,7 +117,7 @@ struct SearchView: View {
         ZStack(alignment: .leading) {
             HiddenSearchTextField(
                 text: $viewModel.searchText,
-                isEditing: $searchTextInputActive,
+                isEditing: $searchTextInputActive
             )
             .frame(width: 1, height: 1)
             .offset(x: -4_000)
