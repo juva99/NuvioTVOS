@@ -426,7 +426,7 @@
 			mainGroup = 83CBB9F61A601CBA00E9B192;
 			packageReferences = (
 				F1E2D3C4B5A6F7E8D9C0B1A2 /* XCLocalSwiftPackageReference "../MPVKit" */,
-				F1E2D3C4B5A6F7E8D9C0B1A3 /* XCRemoteSwiftPackageReference "KSPlayer" */,
+				F1E2D3C4B5A6F7E8D9C0B1A3 /* XCLocalSwiftPackageReference "../KSPlayerNative" */,
 			);
 			productRefGroup = 83CBBA001A601CBA00E9B192 /* Products */;
 			projectDirPath = "";
@@ -831,18 +831,11 @@
 			isa = XCLocalSwiftPackageReference;
 			relativePath = ../MPVKit;
 		};
-/* End XCLocalSwiftPackageReference section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		F1E2D3C4B5A6F7E8D9C0B1A3 /* XCRemoteSwiftPackageReference "KSPlayer" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/kingslay/KSPlayer.git";
-			requirement = {
-				kind = exactVersion;
-				version = 2.3.4;
-			};
+		F1E2D3C4B5A6F7E8D9C0B1A3 /* XCLocalSwiftPackageReference "../KSPlayerNative" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = ../KSPlayerNative;
 		};
-/* End XCRemoteSwiftPackageReference section */
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		A1B2C3D4E5F6A7B8C9D0E1F2 /* MPVKit */ = {
@@ -852,7 +845,7 @@
 		};
 		A1B2C3D4E5F6A7B8C9D0E1F3 /* KSPlayer */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = F1E2D3C4B5A6F7E8D9C0B1A3 /* XCRemoteSwiftPackageReference "KSPlayer" */;
+			package = F1E2D3C4B5A6F7E8D9C0B1A3 /* XCLocalSwiftPackageReference "../KSPlayerNative" */;
 			productName = KSPlayer;
 		};
 /* End XCSwiftPackageProductDependency section */
