@@ -91,7 +91,6 @@ struct AddonCatalogOption: Identifiable {
 /// Live Cinemeta-backed implementation used by the tvOS home prototype.
 final class CinemetaCatalogRepository: CatalogRepository {
     private let baseURL = URL(string: "https://v3-cinemeta.strem.io")!
-    private let decoder = JSONDecoder()
     private var cachedMetaById: [String: NuvioMeta] = [:]
     private var streamAddons: [StremioStreamAddon] {
         Self.configuredStreamAddonManifestURLs.map { manifestURL in
@@ -123,9 +122,14 @@ final class CinemetaCatalogRepository: CatalogRepository {
             ("series_rating", "Top Rated - Series", "series", "imdbRating")
         ]
 
+        async let movieTop = fetchCatalog(type: "movie", catalogId: "top", skip: nil, search: nil, genre: nil)
+        async let seriesTop = fetchCatalog(type: "series", catalogId: "top", skip: nil, search: nil, genre: nil)
+        async let movieRating = fetchCatalog(type: "movie", catalogId: "imdbRating", skip: nil, search: nil, genre: nil)
+        async let seriesRating = fetchCatalog(type: "series", catalogId: "imdbRating", skip: nil, search: nil, genre: nil)
+        let pages = try await [movieTop, seriesTop, movieRating, seriesRating]
+
         var catalogs: [NuvioCatalog] = []
-        for spec in specs {
-            let page = try await fetchCatalog(type: spec.type, catalogId: spec.catalogId, skip: nil, search: nil, genre: nil)
+        for (spec, page) in zip(specs, pages) {
             page.forEach { cachedMetaById[$0.id] = $0 }
             catalogs.append(
                 NuvioCatalog(
@@ -476,13 +480,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         let capped = Array(streams.prefix(80))
         guard !subtitles.isEmpty else { return capped }
         return capped.map { stream in
-            NuvioStream(
-                url: stream.url,
-                name: stream.name,
-                description: stream.description,
-                addonName: stream.addonName,
-                subtitles: mergedSubtitles(stream.subtitles, subtitles)
-            )
+            stream.withSubtitles(mergedSubtitles(stream.subtitles, subtitles))
         }
     }
 
@@ -699,7 +697,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else {
             throw URLError(.badServerResponse)
         }
-        return try decoder.decode(T.self, from: data)
+        return try JSONDecoder().decode(T.self, from: data)
     }
 }
 
@@ -819,10 +817,19 @@ private struct StremioStream: Decodable {
     let infoHash: String?
     let fileIdx: Int?
     let sources: [String]?
+    let clientResolve: StremioClientResolve?
 
     func toNuvioStream(addonName: String) -> NuvioStream? {
         let streamURL = cleaned(url) ?? cleaned(externalUrl)
-        let hash = cleaned(infoHash)?.lowercased()
+        let isTorboxSelected = DebridProviderKind(
+            settingsValue: ProfileSettings.current.string(forKey: SettingsKey.debridProvider)
+        ) == .torbox && !(ProfileSettings.current.string(forKey: SettingsKey.debridApiKey) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        let isTorboxInstant = isTorboxSelected
+            && clientResolve?.type?.lowercased() == "debrid"
+            && clientResolve?.service?.lowercased() == "torbox"
+            && clientResolve?.isCached == true
+        let hash = (cleaned(infoHash) ?? clientResolve?.resolvedInfoHash)?.lowercased()
         // Keep torrent-only streams (no URL but an info-hash) so debrid can
         // resolve them later; drop only streams that have neither.
         guard streamURL != nil || hash != nil else { return nil }
@@ -839,17 +846,18 @@ private struct StremioStream: Decodable {
             detailLines.append("Size \(Self.sizeFormatter.string(fromByteCount: size))")
         }
 
-        return NuvioStream(
+        let stream = NuvioStream(
             url: streamURL,
             name: displayName,
             description: detailLines.joined(separator: "\n"),
             addonName: addonName,
             subtitles: subtitles?.compactMap { $0.toNuvioSubtitle(source: addonName) } ?? [],
             infoHash: hash,
-            fileIdx: fileIdx,
-            sources: sources ?? [],
-            filename: cleaned(behaviorHints?.filename)
+            fileIdx: fileIdx ?? clientResolve?.fileIdx ?? clientResolve?.serviceIndex,
+            sources: sources ?? clientResolve?.sources ?? [],
+            filename: cleaned(behaviorHints?.filename) ?? cleaned(clientResolve?.filename)
         )
+        return isTorboxInstant ? stream.asTorboxInstant() : stream
     }
 
     private func cleaned(_ value: String?) -> String? {
@@ -864,6 +872,30 @@ private struct StremioStream: Decodable {
         formatter.countStyle = .file
         return formatter
     }()
+}
+
+private struct StremioClientResolve: Decodable {
+    let type: String?
+    let infoHash: String?
+    let fileIdx: Int?
+    let magnetUri: String?
+    let sources: [String]?
+    let filename: String?
+    let service: String?
+    let serviceIndex: Int?
+    let isCached: Bool?
+
+    var resolvedInfoHash: String? {
+        if let hash = infoHash?.trimmingCharacters(in: .whitespacesAndNewlines), !hash.isEmpty {
+            return hash
+        }
+        guard let magnetUri,
+              let range = magnetUri.range(of: "urn:btih:", options: .caseInsensitive) else { return nil }
+        let suffix = magnetUri[range.upperBound...]
+        let hash = String(suffix.prefix { $0 != "&" })
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return hash.isEmpty ? nil : hash
+    }
 }
 
 private struct StremioStreamSubtitle: Decodable {

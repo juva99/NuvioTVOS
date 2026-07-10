@@ -1,0 +1,67 @@
+name: Build unsigned tvOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "tvosApp/**"
+      - ".github/workflows/build-tvos-ipa.yml"
+  pull_request:
+    paths:
+      - "tvosApp/**"
+      - ".github/workflows/build-tvos-ipa.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tvos-ipa-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install CocoaPods dependencies
+        working-directory: tvosApp
+        run: pod install
+
+      - name: Build tvOS app
+        working-directory: tvosApp
+        run: |
+          xcodebuild \
+            -workspace NuvioTV.xcworkspace \
+            -scheme NuvioTV \
+            -configuration Release \
+            -sdk appletvos \
+            -destination "generic/platform=tvOS" \
+            -derivedDataPath "$RUNNER_TEMP/NuvioTVDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            build
+
+      - name: Package unsigned IPA
+        run: |
+          APP_PATH="$RUNNER_TEMP/NuvioTVDerivedData/Build/Products/Release-appletvos/NuvioTV.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/NuvioTVPayload/Payload"
+          cp -R "$APP_PATH" "$RUNNER_TEMP/NuvioTVPayload/Payload/"
+          ditto -c -k --sequesterRsrc --keepParent \
+            "$RUNNER_TEMP/NuvioTVPayload/Payload" \
+            "$RUNNER_TEMP/NuvioTV-unsigned.ipa"
+
+      - name: Upload unsigned IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: NuvioTV-unsigned-${{ github.run_number }}
+          path: ${{ runner.temp }}/NuvioTV-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14

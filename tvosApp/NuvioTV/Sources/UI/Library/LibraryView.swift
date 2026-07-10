@@ -46,6 +46,8 @@ public struct LibraryView: View {
     }
     
     public var body: some View {
+        let groupedItems = viewModel.sortedAndGroupedItems
+
         ZStack(alignment: .top) {
             Color.nuvioBackground(amoled: amoled, body: bodyColor).ignoresSafeArea()
 
@@ -81,7 +83,7 @@ public struct LibraryView: View {
 
                 ScrollView {
                     VStack(alignment: .leading, spacing: 20) {
-                        ForEach(viewModel.sortedAndGroupedItems.keys.sorted(), id: \.self) { group in
+                        ForEach(groupedItems.keys.sorted(), id: \.self) { group in
                             if viewModel.groupOption != .none {
                                 Text(group.capitalized)
                                     .font(.system(size: 28, weight: .semibold))
@@ -90,7 +92,7 @@ public struct LibraryView: View {
                             }
 
                             LazyVGrid(columns: gridColumns, alignment: .leading, spacing: LibraryGridMetrics.posterGap) {
-                                ForEach(viewModel.sortedAndGroupedItems[group] ?? [], id: \.id) { item in
+                                ForEach(groupedItems[group] ?? [], id: \.id) { item in
                                     LibraryItemButton(
                                         item: item,
                                         externalFocus: $focusedItemID,

@@ -55,11 +55,15 @@ class DetailsViewModel: ObservableObject {
         // its late results can't overwrite the newly requested ones.
         streamTask?.cancel()
         streamTask = Task {
+            let torboxInstant = TorboxInstantService(store: ProfileSettings.current)
             uiState.streams = []
             uiState.isLoadingStreams = true
             for await streams in repository.streamsProgressively(id: streamId, type: type) {
                 if Task.isCancelled { return }
                 uiState.streams = streams
+                let prepared = await torboxInstant.prepare(streams)
+                if Task.isCancelled { return }
+                uiState.streams = prepared
             }
             if !Task.isCancelled {
                 uiState.isLoadingStreams = false

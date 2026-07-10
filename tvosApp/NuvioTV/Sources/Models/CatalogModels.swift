@@ -302,6 +302,38 @@ struct NuvioStream: Identifiable, Codable {
             fileIdx: fileIdx, sources: sources, filename: filename
         )
     }
+
+    func withSubtitles(_ subtitles: [NuvioSubtitle]) -> NuvioStream {
+        NuvioStream(
+            url: url, name: name, description: description, addonName: addonName,
+            subtitles: subtitles, addonLogoURL: addonLogoURL, infoHash: infoHash,
+            fileIdx: fileIdx, sources: sources, filename: filename
+        )
+    }
+
+    func asTorboxInstant(cachedName: String? = nil, cachedSize: Int64? = nil) -> NuvioStream {
+        let displayName = name?.localizedCaseInsensitiveContains("TB Instant") == true
+            ? name
+            : [name, "TB Instant"].compactMap { $0 }.joined(separator: " ")
+        var details = ["Ready (TB)"]
+        if let description, !description.isEmpty { details.append(description) }
+        if let cachedSize, cachedSize > 0 {
+            details.append(ByteCountFormatter.string(fromByteCount: cachedSize, countStyle: .file))
+        }
+
+        return NuvioStream(
+            url: url,
+            name: displayName,
+            description: details.joined(separator: "\n"),
+            addonName: "TB Instant",
+            subtitles: subtitles,
+            addonLogoURL: addonLogoURL,
+            infoHash: infoHash,
+            fileIdx: fileIdx,
+            sources: sources,
+            filename: filename ?? cachedName
+        )
+    }
 }
 
 enum PlaybackMarkers {
@@ -951,9 +983,13 @@ enum WatchedStore {
     private static let baseKey = "nuvio.tv.watched.items"
     private static let storageDirectoryName = "WatchedStore"
     private(set) static var activeProfileId: String?
+    private static var cachedItems: [WatchedStoreItem]?
+    private static var cachedItemsKey: String?
+    private static var cachedWholeTitleKeys = Set<String>()
 
     static func setActiveProfile(_ profileId: String?) {
         activeProfileId = profileId
+        invalidateCache()
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -963,23 +999,28 @@ enum WatchedStore {
     }
 
     static func items() -> [WatchedStoreItem] {
-        guard let data = readData(forKey: storageKey),
+        let key = storageKey
+        if cachedItemsKey == key, let cachedItems {
+            return cachedItems
+        }
+
+        guard let data = readData(forKey: key),
               let decoded = try? JSONDecoder().decode([WatchedStoreItem].self, from: data) else {
+            updateCache([], forKey: key)
             return []
         }
 
-        return decoded.sorted { $0.watchedAt > $1.watchedAt }
+        let sorted = decoded.sorted { $0.watchedAt > $1.watchedAt }
+        updateCache(sorted, forKey: key)
+        return sorted
     }
 
     /// Whole-title watched state (movies, or a series marked watched
     /// explicitly). Episode-level entries deliberately don't count here so one
     /// finished episode doesn't checkmark the whole series poster.
     static func contains(metaId: String, type: String) -> Bool {
-        items().contains {
-            $0.meta.id == metaId
-                && $0.meta.type.caseInsensitiveCompare(type) == .orderedSame
-                && $0.season == nil && $0.episode == nil
-        }
+        _ = items()
+        return cachedWholeTitleKeys.contains(wholeTitleKey(metaId: metaId, type: type))
     }
 
     static func containsEpisode(metaId: String, season: Int, episode: Int) -> Bool {
@@ -1119,7 +1160,9 @@ enum WatchedStore {
 
     private static func persist(_ items: [WatchedStoreItem]) {
         guard let data = try? JSONEncoder().encode(items) else { return }
-        writeData(data, forKey: storageKey)
+        let key = storageKey
+        guard writeData(data, forKey: key) else { return }
+        updateCache(items, forKey: key)
         NotificationCenter.default.post(name: changedNotification, object: nil)
     }
 
@@ -1131,7 +1174,27 @@ enum WatchedStore {
             .filter { $0.hasPrefix(baseKey) }
             .forEach { defaults.removeObject(forKey: $0) }
         try? FileManager.default.removeItem(at: storageDirectoryURL)
+        invalidateCache()
         NotificationCenter.default.post(name: changedNotification, object: nil)
+    }
+
+    private static func updateCache(_ items: [WatchedStoreItem], forKey key: String) {
+        cachedItemsKey = key
+        cachedItems = items
+        cachedWholeTitleKeys = Set(items.compactMap { item in
+            guard item.season == nil, item.episode == nil else { return nil }
+            return wholeTitleKey(metaId: item.meta.id, type: item.meta.type)
+        })
+    }
+
+    private static func invalidateCache() {
+        cachedItems = nil
+        cachedItemsKey = nil
+        cachedWholeTitleKeys.removeAll(keepingCapacity: true)
+    }
+
+    private static func wholeTitleKey(metaId: String, type: String) -> String {
+        "\(type.lowercased())\u{1}\(metaId)"
     }
 
     private static func readData(forKey key: String) -> Data? {
