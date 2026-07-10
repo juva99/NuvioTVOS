@@ -62,6 +62,8 @@
     <string>Allow $(PRODUCT_NAME) to access your local network</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>This app does not require microphone access.</string>
+    <key>TMDB_API_KEY</key>
+    <string>ee7b559d41e46cafa6b24e56b0438f8a</string>
     <key>UIBackgroundModes</key>
     <array>
       <string>audio</string>

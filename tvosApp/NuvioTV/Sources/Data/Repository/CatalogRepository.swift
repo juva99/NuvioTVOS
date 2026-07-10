@@ -52,9 +52,8 @@ protocol CatalogRepository {
     /// Get available genres for content type
     func getGenres(contentType: String) async throws -> [String]
 
-    /// Resolve a synced collection folder's add-on catalog sources into items.
-    /// Unresolvable sources (unknown add-on ids, TMDB/Trakt) are skipped.
-    func getCollectionFolderItems(sources: [NuvioCollectionCatalogSource], limit: Int) async -> [NuvioMeta]
+    /// Resolve the same add-on, TMDB, and Trakt collection sources as Android TV.
+    func getCollectionFolderItems(folder: NuvioCollectionFolder, limit: Int) async -> [NuvioMeta]
 }
 
 extension CatalogRepository {
@@ -231,6 +230,10 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
     func getMetadata(id: String, type: String) async throws -> NuvioMeta {
         if let cached = cachedMetaById[id] {
+            return cached
+        }
+        if let cached = await CollectionFolderMetadataCache.shared.item(id: id) {
+            cachedMetaById[id] = cached
             return cached
         }
 
@@ -623,35 +626,160 @@ final class CinemetaCatalogRepository: CatalogRepository {
         return manifest
     }
 
-    func getCollectionFolderItems(sources: [NuvioCollectionCatalogSource], limit: Int) async -> [NuvioMeta] {
+    func getCollectionFolderItems(folder: NuvioCollectionFolder, limit: Int) async -> [NuvioMeta] {
         var items: [NuvioMeta] = []
         var seen = Set<String>()
 
+        var sources = folder.sources
+        if sources.isEmpty {
+            sources = folder.catalogSources.map { source in
+                NuvioCollectionSource(
+                    provider: "addon",
+                    addonId: source.addonId,
+                    type: source.type,
+                    catalogId: source.catalogId,
+                    genre: source.genre
+                )
+            }
+        }
+
         for source in sources {
             guard items.count < limit else { break }
-            guard let resolved = await resolvedCatalog(for: source) else {
-                print("Collection catalog not found: \(source.addonId) \(source.type)/\(source.catalogId)")
-                continue
+            let loaded: [NuvioMeta]
+            switch source.provider.lowercased() {
+            case "tmdb": loaded = await tmdbCollectionItems(source: source)
+            case "trakt": loaded = await traktCollectionItems(source: source)
+            default: loaded = await addonCollectionItems(source: source)
             }
-            do {
-                var path = "catalog/\(source.type)/\(resolved.catalogId)"
-                if let genreExtra = source.genre.flatMap({ encodedExtra(name: "genre", value: $0) }) {
-                    path += "/" + genreExtra
-                }
-                path += ".json"
-                let response: CinemetaCatalogResponse = try await fetch(resolved.baseURL.appendingPathComponent(path))
-                for meta in response.metas.map({ $0.toMeta(fallbackType: source.type) }) {
-                    guard items.count < limit else { break }
-                    guard seen.insert(meta.id).inserted else { continue }
-                    cachedMetaById[meta.id] = meta
-                    items.append(meta)
-                }
-            } catch {
-                print("Collection catalog failed: \(source.type)/\(source.catalogId): \(error.localizedDescription)")
-                continue
+            for meta in loaded where items.count < limit {
+                guard seen.insert("\(meta.type):\(meta.id)").inserted else { continue }
+                cachedMetaById[meta.id] = meta
+                await CollectionFolderMetadataCache.shared.store(meta)
+                items.append(meta)
             }
         }
         return items
+    }
+
+    private func addonCollectionItems(source: NuvioCollectionSource) async -> [NuvioMeta] {
+        guard let addonId = source.addonId, let type = source.type, let catalogId = source.catalogId else { return [] }
+        let catalogSource = NuvioCollectionCatalogSource(addonId: addonId, type: type, catalogId: catalogId, genre: source.genre)
+        guard let resolved = await resolvedCatalog(for: catalogSource) else {
+            print("Collection catalog not found: \(addonId) \(type)/\(catalogId)")
+            return []
+        }
+        do {
+            var path = "catalog/\(type)/\(resolved.catalogId)"
+            if let genre = source.genre, !genre.isEmpty, genre.caseInsensitiveCompare("None") != .orderedSame,
+               let extra = encodedExtra(name: "genre", value: genre) {
+                path += "/" + extra
+            }
+            path += ".json"
+            let response: CinemetaCatalogResponse = try await fetch(resolved.baseURL.appendingPathComponent(path))
+            return response.metas.map { $0.toMeta(fallbackType: type) }
+        } catch {
+            print("Collection catalog failed: \(type)/\(catalogId): \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private func tmdbCollectionItems(source: NuvioCollectionSource) async -> [NuvioMeta] {
+        let userKey = ProfileSettings.current.string(forKey: SettingsKey.tmdbApiKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let bundledKey = (Bundle.main.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let key = userKey.isEmpty ? bundledKey : userKey
+        guard !key.isEmpty else { return [] }
+        let sourceType = source.tmdbSourceType?.uppercased() ?? "DISCOVER"
+        let media = source.mediaType?.lowercased() == "tv" ? "tv" : "movie"
+        let id = source.tmdbId
+        var path: String
+        var query: [URLQueryItem] = [URLQueryItem(name: "api_key", value: key)]
+        switch sourceType {
+        case "LIST": guard let id else { return [] }; path = "list/\(id)"
+        case "COLLECTION": guard let id else { return [] }; path = "collection/\(id)"
+        case "PERSON", "DIRECTOR": guard let id else { return [] }; path = "person/\(id)/combined_credits"
+        default:
+            path = "discover/\(sourceType == "NETWORK" ? "tv" : media)"
+            if let id, sourceType == "COMPANY" { query.append(URLQueryItem(name: "with_companies", value: String(id))) }
+            if let id, sourceType == "NETWORK" { query.append(URLQueryItem(name: "with_networks", value: String(id))) }
+            appendTmdbFilters(source.filters, media: sourceType == "NETWORK" ? "tv" : media, to: &query)
+            if let sort = normalizedTmdbSort(source.sortBy, media: sourceType == "NETWORK" ? "tv" : media) {
+                query.append(URLQueryItem(name: "sort_by", value: sort))
+            }
+        }
+        var components = URLComponents(string: "https://api.themoviedb.org/3/\(path)")!
+        components.queryItems = query
+        do {
+            let response: TmdbCollectionResponse = try await fetch(components.url!)
+            let values: [TmdbCollectionItem]
+            if sourceType == "DIRECTOR" {
+                values = response.crew ?? []
+            } else if sourceType == "PERSON" {
+                values = response.cast ?? []
+            } else {
+                values = response.items ?? response.parts ?? response.results ?? []
+            }
+            return values
+                .filter { sourceType != "DIRECTOR" || $0.job?.caseInsensitiveCompare("Director") == .orderedSame }
+                .filter { (sourceType != "PERSON" && sourceType != "DIRECTOR") || $0.matches(media: media) }
+                .compactMap { $0.toMeta(fallbackMedia: media) }
+        } catch {
+            print("TMDB collection failed: \(error.localizedDescription)")
+            return []
+        }
+    }
+
+    private func appendTmdbFilters(_ filters: NuvioCollectionTmdbFilters?, media: String, to query: inout [URLQueryItem]) {
+        guard let filters else { return }
+        let datePrefix = media == "tv" ? "first_air_date" : "primary_release_date"
+        let yearName = media == "tv" ? "first_air_date_year" : "year"
+        let values: [(String, String?)] = [
+            ("with_genres", filters.withGenres), ("\(datePrefix).gte", filters.releaseDateGte),
+            ("\(datePrefix).lte", filters.releaseDateLte), ("vote_average.gte", filters.voteAverageGte.map(String.init)),
+            ("vote_average.lte", filters.voteAverageLte.map(String.init)), ("vote_count.gte", filters.voteCountGte.map(String.init)),
+            ("with_original_language", filters.withOriginalLanguage), ("with_origin_country", filters.withOriginCountry),
+            ("with_keywords", filters.withKeywords), ("with_companies", filters.withCompanies),
+            ("with_networks", filters.withNetworks), (yearName, filters.year.map(String.init)),
+            ("watch_region", filters.withWatchProviders == nil ? filters.watchRegion : filters.watchRegion ?? "US"),
+            ("with_watch_providers", filters.withWatchProviders),
+            ("with_watch_monetization_types", filters.withWatchProviders == nil ? nil : "flatrate|free|ads|rent|buy")
+        ]
+        query.append(contentsOf: values.compactMap { name, value in value.map { URLQueryItem(name: name, value: $0) } })
+    }
+
+    private func normalizedTmdbSort(_ value: String?, media: String) -> String? {
+        guard var value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else { return nil }
+        if media == "tv" {
+            value = value.replacingOccurrences(of: "primary_release_date", with: "first_air_date")
+        } else {
+            value = value.replacingOccurrences(of: "first_air_date", with: "primary_release_date")
+        }
+        return value == "original" ? nil : value
+    }
+
+    private func traktCollectionItems(source: NuvioCollectionSource) async -> [NuvioMeta] {
+        guard let listId = source.traktListId, TraktConfig.proxyConfigured else { return [] }
+        let type = source.mediaType?.lowercased() == "tv" ? "show" : "movie"
+        let base = TraktConfig.proxyURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        var components = URLComponents(string: "\(base)/lists/\(listId)/items/\(type)")!
+        components.queryItems = [
+            URLQueryItem(name: "page", value: "1"), URLQueryItem(name: "limit", value: "100"),
+            URLQueryItem(name: "extended", value: "full,images"),
+            URLQueryItem(name: "sort_by", value: source.sortBy ?? "rank"),
+            URLQueryItem(name: "sort_how", value: source.sortHow ?? "asc")
+        ]
+        var request = URLRequest(url: components.url!)
+        request.setValue(AuthConfig.apiKey, forHTTPHeaderField: "apikey")
+        request.setValue("Bearer \(AuthConfig.apiKey)", forHTTPHeaderField: "Authorization")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse, 200..<300 ~= http.statusCode else { return [] }
+            return try JSONDecoder().decode([TraktCollectionItem].self, from: data).compactMap { $0.toMeta() }
+        } catch {
+            print("Trakt collection failed: \(error.localizedDescription)")
+            return []
+        }
     }
 
     private func resolvedCatalog(for source: NuvioCollectionCatalogSource) async -> (baseURL: URL, catalogId: String)? {
@@ -719,6 +847,153 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
 private struct CinemetaCatalogResponse: Decodable {
     let metas: [CinemetaMeta]
+}
+
+private actor CollectionFolderMetadataCache {
+    static let shared = CollectionFolderMetadataCache()
+    private var items: [String: NuvioMeta] = [:]
+
+    func item(id: String) -> NuvioMeta? { items[id] }
+    func store(_ item: NuvioMeta) { items[item.id] = item }
+}
+
+private struct TmdbCollectionResponse: Decodable {
+    let items: [TmdbCollectionItem]?
+    let parts: [TmdbCollectionItem]?
+    let results: [TmdbCollectionItem]?
+    let cast: [TmdbCollectionItem]?
+    let crew: [TmdbCollectionItem]?
+}
+
+private struct TmdbCollectionItem: Decodable {
+    let id: Int
+    let mediaType: String?
+    let title: String?
+    let name: String?
+    let originalTitle: String?
+    let originalName: String?
+    let overview: String?
+    let posterPath: String?
+    let backdropPath: String?
+    let releaseDate: String?
+    let firstAirDate: String?
+    let voteAverage: Double?
+    let genreIds: [Int]?
+    let job: String?
+
+    enum CodingKeys: String, CodingKey {
+        case id, title, name, overview, job
+        case mediaType = "media_type"
+        case originalTitle = "original_title"
+        case originalName = "original_name"
+        case posterPath = "poster_path"
+        case backdropPath = "backdrop_path"
+        case releaseDate = "release_date"
+        case firstAirDate = "first_air_date"
+        case voteAverage = "vote_average"
+        case genreIds = "genre_ids"
+    }
+
+    func toMeta(fallbackMedia: String) -> NuvioMeta? {
+        guard let displayName = [title, name, originalTitle, originalName]
+            .compactMap({ $0?.trimmingCharacters(in: .whitespacesAndNewlines) })
+            .first(where: { !$0.isEmpty }) else { return nil }
+        let rawMedia = mediaType?.lowercased() ?? fallbackMedia
+        let type = rawMedia == "tv" ? "series" : "movie"
+        let date = releaseDate ?? firstAirDate
+        return NuvioMeta(
+            id: "tmdb:\(id)",
+            name: displayName,
+            description: overview,
+            posterUrl: TmdbCollectionItem.imageURL(posterPath, size: "w500") ?? TmdbCollectionItem.imageURL(backdropPath, size: "w780"),
+            backgroundUrl: TmdbCollectionItem.imageURL(backdropPath, size: "w1280"),
+            logoUrl: nil,
+            imdbId: nil,
+            tmdbId: id,
+            type: type,
+            year: date.flatMap { Int($0.prefix(4)) },
+            genres: nil,
+            rating: voteAverage,
+            releaseInfo: date.map { String($0.prefix(4)) },
+            runtime: nil,
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: date
+        )
+    }
+
+    func matches(media: String) -> Bool {
+        guard let mediaType else { return true }
+        return mediaType.lowercased() == media
+    }
+
+    private static func imageURL(_ path: String?, size: String) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        return "https://image.tmdb.org/t/p/\(size)\(path)"
+    }
+}
+
+private struct TraktCollectionItem: Decodable {
+    let movie: TraktCollectionMedia?
+    let show: TraktCollectionMedia?
+
+    func toMeta() -> NuvioMeta? {
+        (movie ?? show)?.toMeta(isSeries: show != nil)
+    }
+}
+
+private struct TraktCollectionMedia: Decodable {
+    let title: String?
+    let year: Int?
+    let overview: String?
+    let rating: Double?
+    let genres: [String]?
+    let runtime: Int?
+    let ids: TraktCollectionIds?
+    let images: TraktCollectionImages?
+
+    func toMeta(isSeries: Bool) -> NuvioMeta? {
+        guard let title = title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty else { return nil }
+        let id = ids?.imdb?.nilIfEmpty ?? ids?.tmdb.map { "tmdb:\($0)" } ?? ids?.trakt.map { "trakt:\($0)" }
+        guard let id else { return nil }
+        return NuvioMeta(
+            id: id,
+            name: title,
+            description: overview,
+            posterUrl: images?.poster?.first,
+            backgroundUrl: images?.fanart?.first,
+            logoUrl: images?.logo?.first,
+            imdbId: ids?.imdb,
+            tmdbId: ids?.tmdb,
+            type: isSeries ? "series" : "movie",
+            year: year,
+            genres: genres,
+            rating: rating,
+            releaseInfo: year.map(String.init),
+            runtime: runtime.map { "\($0) min" },
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: nil
+        )
+    }
+}
+
+private struct TraktCollectionIds: Decodable {
+    let trakt: Int?
+    let imdb: String?
+    let tmdb: Int?
+}
+
+private struct TraktCollectionImages: Decodable {
+    let poster: [String]?
+    let fanart: [String]?
+    let logo: [String]?
 }
 
 /// The slice of a Stremio manifest the home screen needs: identity plus the
@@ -1108,7 +1383,7 @@ private struct FlexibleString: Decodable {
 
 /// Mock implementation for testing without Rust SDK
 class MockCatalogRepository: CatalogRepository {
-    func getCollectionFolderItems(sources: [NuvioCollectionCatalogSource], limit: Int) async -> [NuvioMeta] {
+    func getCollectionFolderItems(folder: NuvioCollectionFolder, limit: Int) async -> [NuvioMeta] {
         []
     }
 

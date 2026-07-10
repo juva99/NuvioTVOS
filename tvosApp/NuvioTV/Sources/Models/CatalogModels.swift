@@ -898,6 +898,36 @@ struct NuvioCollectionSource: Codable {
     var type: String?
     var catalogId: String?
     var genre: String?
+    var tmdbSourceType: String?
+    var title: String?
+    var tmdbId: Int?
+    var traktListId: Int64?
+    var mediaType: String?
+    var sortBy: String?
+    var sortHow: String?
+    var filters: NuvioCollectionTmdbFilters?
+
+    init(
+        provider: String,
+        addonId: String? = nil,
+        type: String? = nil,
+        catalogId: String? = nil,
+        genre: String? = nil
+    ) {
+        self.provider = provider
+        self.addonId = addonId
+        self.type = type
+        self.catalogId = catalogId
+        self.genre = genre
+        tmdbSourceType = nil
+        title = nil
+        tmdbId = nil
+        traktListId = nil
+        mediaType = nil
+        sortBy = nil
+        sortHow = nil
+        filters = nil
+    }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -906,7 +936,32 @@ struct NuvioCollectionSource: Codable {
         type = try c.decodeIfPresent(String.self, forKey: .type)
         catalogId = try c.decodeIfPresent(String.self, forKey: .catalogId)
         genre = try c.decodeIfPresent(String.self, forKey: .genre)
+        tmdbSourceType = try c.decodeIfPresent(String.self, forKey: .tmdbSourceType)
+        title = try c.decodeIfPresent(String.self, forKey: .title)
+        tmdbId = try c.decodeIfPresent(Int.self, forKey: .tmdbId)
+        traktListId = try c.decodeIfPresent(Int64.self, forKey: .traktListId)
+        mediaType = try c.decodeIfPresent(String.self, forKey: .mediaType)
+        sortBy = try c.decodeIfPresent(String.self, forKey: .sortBy)
+        sortHow = try c.decodeIfPresent(String.self, forKey: .sortHow)
+        filters = try c.decodeIfPresent(NuvioCollectionTmdbFilters.self, forKey: .filters)
     }
+}
+
+struct NuvioCollectionTmdbFilters: Codable {
+    var withGenres: String?
+    var releaseDateGte: String?
+    var releaseDateLte: String?
+    var voteAverageGte: Double?
+    var voteAverageLte: Double?
+    var voteCountGte: Int?
+    var withOriginalLanguage: String?
+    var withOriginCountry: String?
+    var withKeywords: String?
+    var withCompanies: String?
+    var withNetworks: String?
+    var year: Int?
+    var watchRegion: String?
+    var withWatchProviders: String?
 }
 
 struct NuvioCollectionCatalogSource: Codable {

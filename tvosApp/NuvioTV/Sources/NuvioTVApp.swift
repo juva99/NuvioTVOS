@@ -1901,8 +1901,14 @@ private struct CollectionFolderView: View {
     private var emptyMessage: String {
         guard let folder else { return "This collection folder is no longer available." }
         let providers = Set(folder.sources.map { $0.provider.lowercased() })
-        if providers.contains("tmdb") || providers.contains("trakt") {
-            return "This folder uses a TMDB or Trakt source that is not available on tvOS yet."
+        let bundledTmdbKey = Bundle.main.object(forInfoDictionaryKey: "TMDB_API_KEY") as? String ?? ""
+        if providers.contains("tmdb"),
+           (ProfileSettings.current.string(forKey: SettingsKey.tmdbApiKey) ?? "").isEmpty,
+           bundledTmdbKey.isEmpty {
+            return "Add a TMDB API key in Settings to load this collection."
+        }
+        if providers.contains("trakt"), !TraktConfig.proxyConfigured {
+            return "Connect Nuvio Sync to load this Trakt collection."
         }
         return "No titles are currently available in this folder."
     }
@@ -1913,7 +1919,7 @@ private struct CollectionFolderView: View {
             isLoading = false
             return
         }
-        items = await repository.getCollectionFolderItems(sources: folder.addonCatalogSources, limit: 120)
+        items = await repository.getCollectionFolderItems(folder: folder, limit: 120)
         isLoading = false
     }
 }

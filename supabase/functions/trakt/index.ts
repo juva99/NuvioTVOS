@@ -89,6 +89,13 @@ Deno.serve(async (request) => {
       return await forwardTrakt(request, route, undefined, token);
     }
 
+    if (
+      request.method === "GET" &&
+      /^lists\/[^/]+\/items\/(movie|show)$/.test(route)
+    ) {
+      return await forwardTrakt(request, route);
+    }
+
     if (request.method === "GET" && route === "account/session") {
       return jsonResponse(
         {
@@ -112,7 +119,8 @@ async function forwardTrakt(
   body?: Record<string, JsonValue>,
   accessToken?: string,
 ): Promise<Response> {
-  const upstream = await fetch(`${TRAKT_API_URL}/${route}`, {
+  const requestURL = new URL(request.url);
+  const upstream = await fetch(`${TRAKT_API_URL}/${route}${requestURL.search}`, {
     method: request.method,
     headers: traktHeaders(accessToken),
     body: body === undefined ? undefined : JSON.stringify(body),
