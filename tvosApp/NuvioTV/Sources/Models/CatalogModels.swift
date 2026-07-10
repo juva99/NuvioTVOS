@@ -829,6 +829,7 @@ struct NuvioCollectionFolder: Codable, Identifiable {
     var sources: [NuvioCollectionSource]
     /// Legacy pre-`sources` field still present in old blobs.
     var catalogSources: [NuvioCollectionCatalogSource]
+    var cardId: String { "collection-folder:\(id)" }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)

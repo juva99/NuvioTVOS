@@ -10,6 +10,7 @@
 import SwiftUI
 import UIKit
 import Security
+import TVServices
 
 @MainActor
 final class AuthManager: ObservableObject {
@@ -66,6 +67,13 @@ final class AuthManager: ObservableObject {
         let defaults = UserDefaults.standard
         guard !defaults.bool(forKey: Self.installMarkerKey) else { return }
         defaults.set(true, forKey: Self.installMarkerKey)
+        // This marker is user-specific when the app runs as the current Apple
+        // TV user. A missing marker can therefore mean a newly added TV user,
+        // not a reinstall; preserve the account shared through the
+        // user-independent Keychain in that case.
+        if TVUserManager().shouldStorePreferencesForCurrentUser {
+            return
+        }
         store.clear()
         store.didSkipLogin = false
     }
@@ -340,6 +348,11 @@ struct SessionStore {
            let session = try? JSONDecoder().decode(AuthSession.self, from: data) {
             return session
         }
+        if let data = loadLegacyKeychainData(),
+           let session = try? JSONDecoder().decode(AuthSession.self, from: data) {
+            saveKeychainData(data)
+            return session
+        }
         return migrateLegacySession()
     }
 
@@ -352,6 +365,7 @@ struct SessionStore {
 
     func clear() {
         deleteKeychainData()
+        SecItemDelete(legacyKeychainQuery as CFDictionary)
         defaults.removeObject(forKey: legacySessionKey)
     }
 
@@ -370,7 +384,7 @@ struct SessionStore {
         return session
     }
 
-    private var keychainQuery: [String: Any] {
+    private var legacyKeychainQuery: [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: keychainService,
@@ -378,8 +392,27 @@ struct SessionStore {
         ]
     }
 
+    private var keychainQuery: [String: Any] {
+        var query = legacyKeychainQuery
+        if #available(tvOS 16.0, *) {
+            query[kSecUseUserIndependentKeychain as String] = kCFBooleanTrue
+        }
+        return query
+    }
+
     private func loadKeychainData() -> Data? {
         var query = keychainQuery
+        query[kSecReturnData as String] = kCFBooleanTrue
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess else { return nil }
+        return item as? Data
+    }
+
+    private func loadLegacyKeychainData() -> Data? {
+        var query = legacyKeychainQuery
         query[kSecReturnData as String] = kCFBooleanTrue
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 

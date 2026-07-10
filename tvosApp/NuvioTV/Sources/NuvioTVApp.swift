@@ -26,6 +26,7 @@ enum TVScreen {
     case details(id: String, type: String)
     case player(url: URL, meta: NuvioMeta, subtitle: String, externalSubtitles: [NuvioSubtitle], resumeFrom: Double?)
     case cloudLibrary
+    case collectionFolder(collectionId: String, folderId: String)
 }
 
 enum TVTab: String, CaseIterable, Identifiable {
@@ -112,7 +113,7 @@ struct ContentView: View {
                         }
                 }
 
-            case .main, .details, .player, .cloudLibrary:
+            case .main, .details, .player, .cloudLibrary, .collectionFolder:
                 // The tab view (Home included) stays mounted for the whole
                 // session; Details and Player are presented as overlays on TOP
                 // of it rather than replacing it. Returning therefore leaves
@@ -151,7 +152,9 @@ struct ContentView: View {
                 let autoSelectLast = ProfileSettings.current.object(
                     forKey: SettingsKey.profileAutoSelectLast
                 ) as? Bool ?? true
-                if autoSelectLast, profileViewModel.activeProfile != nil {
+                if autoSelectLast,
+                   let profile = profileViewModel.activeProfile,
+                   !profile.isPinProtected {
                     activeScreen = .main
                 } else {
                     activeScreen = .profileSelection
@@ -185,7 +188,7 @@ struct ContentView: View {
     /// visible behind its glass panel.
     private var fullScreenOverlayPresented: Bool {
         switch activeScreen {
-        case .details, .player, .cloudLibrary: return true
+        case .details, .player, .cloudLibrary, .collectionFolder: return true
         default: return false
         }
     }
@@ -212,6 +215,10 @@ struct ContentView: View {
                     : .main
             }
         case .cloudLibrary:
+            withAnimation(.easeInOut(duration: 0.24)) {
+                activeScreen = .main
+            }
+        case .collectionFolder:
             withAnimation(.easeInOut(duration: 0.24)) {
                 activeScreen = .main
             }
@@ -359,6 +366,26 @@ struct ContentView: View {
                     .zIndex(1)
             }
 
+            if case .collectionFolder(let collectionId, let folderId) = activeScreen {
+                CollectionFolderView(
+                    collectionId: collectionId,
+                    folderId: folderId,
+                    repository: CinemetaCatalogRepository(),
+                    onSelect: { meta in
+                        withAnimation(.easeInOut(duration: 0.28)) {
+                            activeScreen = .details(id: meta.id, type: meta.type)
+                        }
+                    },
+                    onBack: {
+                        withAnimation(.easeInOut(duration: 0.24)) {
+                            activeScreen = .main
+                        }
+                    }
+                )
+                .transition(.opacity)
+                .zIndex(1)
+            }
+
             if let menuMeta = cardMenuMeta {
                 CardActionMenuOverlay(
                     meta: menuMeta,
@@ -430,6 +457,11 @@ struct ContentView: View {
             onNavigateToDetails: { contentId, contentType in
                 withAnimation(.easeInOut(duration: 0.28)) {
                     activeScreen = .details(id: contentId, type: contentType)
+                }
+            },
+            onOpenCollectionFolder: { collectionId, folderId in
+                withAnimation(.easeInOut(duration: 0.28)) {
+                    activeScreen = .collectionFolder(collectionId: collectionId, folderId: folderId)
                 }
             },
             onResumePlayback: { item in
@@ -828,6 +860,7 @@ private struct TVMainTabView: View {
     let onSignIn: () -> Void
     let onSignOut: () -> Void
     let onNavigateToDetails: (String, String) -> Void
+    let onOpenCollectionFolder: (String, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
     let onLongPressCard: (NuvioMeta) -> Void
     let onOpenCloudLibrary: () -> Void
@@ -883,6 +916,7 @@ private struct TVMainTabView: View {
                 store: homeStore,
                 repository: CinemetaCatalogRepository(),
                 onNavigateToDetails: onNavigateToDetails,
+                onOpenCollectionFolder: onOpenCollectionFolder,
                 onResumePlayback: onResumePlayback,
                 onLongPressCard: onLongPressCard
             )
@@ -1145,6 +1179,7 @@ struct TVHomeView: View {
     @ObservedObject var store: TVHomeStore
     let repository: CatalogRepository
     let onNavigateToDetails: (String, String) -> Void
+    let onOpenCollectionFolder: (String, String) -> Void
     let onResumePlayback: (ContinueWatchingItem) -> Void
     var onLongPressCard: ((NuvioMeta) -> Void)? = nil
 
@@ -1300,11 +1335,14 @@ struct TVHomeView: View {
                                             if section.id == TVHomeSection.continueWatchingId,
                                                let item = continueWatchingByMetaId[meta.id] {
                                                 onResumePlayback(item)
+                                            } else if let collectionId = section.collectionId,
+                                                      let folderId = section.folderId(for: meta.id) {
+                                                onOpenCollectionFolder(collectionId, folderId)
                                             } else {
                                                 onNavigateToDetails(meta.id, meta.type)
                                             }
                                         },
-                                        onLongPress: onLongPressCard
+                                        onLongPress: section.isCollectionRow ? nil : onLongPressCard
                                     )
                                     .background(
                                         GeometryReader { rowGeo in
@@ -1470,7 +1508,9 @@ struct TVHomeView: View {
         let allSections = continueWatching.isEmpty ? store.sections : [resumeSection] + store.sections
 
         return allSections.map { section in
-            TVHomeSection(id: section.id, title: section.title, items: section.items.filter(isVisible))
+            var visible = section
+            visible.items = section.items.filter(isVisible)
+            return visible
         }
     }
 
@@ -1592,31 +1632,46 @@ struct TVHomeView: View {
         }
     }
 
-    /// Builds one Home row per synced collection folder, resolving each
-    /// folder's add-on catalog sources into items. Folders whose sources are
-    /// all unresolvable (TMDB/Trakt-only, unknown add-ons) are skipped.
+    /// Builds one Home row per collection. Folder cards are not gated on source
+    /// resolution, matching Android TV and keeping custom collections visible.
     private func loadCollectionSections() async -> [TVHomeSection] {
-        var sections: [TVHomeSection] = []
-        for collection in CollectionsStore.collections() {
-            for folder in collection.folders {
-                let sources = folder.addonCatalogSources
-                guard !sources.isEmpty else { continue }
-                let items = await repository.getCollectionFolderItems(sources: sources, limit: 18)
-                guard !items.isEmpty else { continue }
-                let title = collection.title.caseInsensitiveCompare(folder.title) == .orderedSame
-                    ? collection.title
-                    : "\(collection.title) • \(folder.title)"
-                sections.append(
-                    TVHomeSection(
-                        id: "\(TVHomeSection.collectionIdPrefix)\(collection.id)_\(folder.id)",
-                        title: title,
-                        items: items,
-                        isPinnedCollection: collection.pinToTop
-                    )
+        CollectionsStore.collections().compactMap { collection in
+            guard !collection.folders.isEmpty else { return nil }
+            let folderCards = collection.folders.map { folder in
+                NuvioMeta(
+                    id: folder.cardId,
+                    name: folder.title,
+                    description: folder.coverEmoji,
+                    posterUrl: folder.coverImageUrl,
+                    backgroundUrl: folder.coverImageUrl,
+                    logoUrl: nil,
+                    imdbId: nil,
+                    tmdbId: nil,
+                    type: "collection_folder",
+                    year: nil,
+                    genres: nil,
+                    rating: nil,
+                    releaseInfo: nil,
+                    runtime: nil,
+                    cast: nil,
+                    director: nil,
+                    writer: nil,
+                    certification: nil,
+                    country: nil,
+                    released: nil
                 )
             }
+            return TVHomeSection(
+                id: "\(TVHomeSection.collectionIdPrefix)\(collection.id)",
+                title: collection.title,
+                items: folderCards,
+                isPinnedCollection: collection.pinToTop,
+                collectionId: collection.id,
+                collectionFolderIdsByCardId: collection.folders.reduce(into: [:]) { result, folder in
+                    result[folder.cardId] = folder.id
+                }
+            )
         }
-        return sections
     }
 
     /// Re-resolves collection rows in place after a sync pull lands while
@@ -1631,8 +1686,9 @@ struct TVHomeView: View {
         TVHomeCatalogOrder.writeSnapshot(merged)
         // Only publish when the row set actually changed; rebuilding the
         // section list disturbs tvOS focus.
-        let currentIds = store.sections.map(\.id)
-        if merged.map(\.id) != currentIds {
+        let currentSignature = store.sections.map(\.refreshSignature)
+        let mergedSignature = merged.map(\.refreshSignature)
+        if mergedSignature != currentSignature {
             store.sections = merged
         }
     }
@@ -1754,8 +1810,100 @@ struct TVHomeSection: Identifiable {
     var isLoadingMore: Bool = false
     /// Pinned collections render above the standard catalog rows.
     var isPinnedCollection: Bool = false
+    var collectionId: String? = nil
+    var collectionFolderIdsByCardId: [String: String] = [:]
 
     var isCollectionRow: Bool { id.hasPrefix(Self.collectionIdPrefix) }
+    func folderId(for cardId: String) -> String? { collectionFolderIdsByCardId[cardId] }
+    var refreshSignature: String {
+        let itemSignature = items.map { "\($0.id):\($0.name):\($0.posterUrl ?? "")" }.joined(separator: ",")
+        return "\(id)|\(title)|\(isPinnedCollection)|\(itemSignature)"
+    }
+}
+
+private struct CollectionFolderView: View {
+    let collectionId: String
+    let folderId: String
+    let repository: CatalogRepository
+    let onSelect: (NuvioMeta) -> Void
+    let onBack: () -> Void
+
+    @State private var items: [NuvioMeta] = []
+    @State private var isLoading = true
+
+    private var collection: NuvioCollection? {
+        CollectionsStore.collections().first { $0.id == collectionId }
+    }
+
+    private var folder: NuvioCollectionFolder? {
+        collection?.folders.first { $0.id == folderId }
+    }
+
+    var body: some View {
+        ZStack {
+            Color.black.ignoresSafeArea()
+            VStack(alignment: .leading, spacing: 24) {
+                Text(folder?.title ?? collection?.title ?? "Collection")
+                    .font(.custom("Inter-Bold", size: 48))
+                    .foregroundColor(.white)
+
+                content
+            }
+            .padding(.horizontal, 72)
+            .padding(.vertical, 48)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        }
+        .task { await load() }
+        .onExitCommand(perform: onBack)
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if isLoading {
+            ProgressView()
+                .scaleEffect(1.4)
+                .tint(.white)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if items.isEmpty {
+            VStack(spacing: 16) {
+                Image(systemName: "rectangle.stack.badge.exclamationmark")
+                    .font(.system(size: 56))
+                Text(emptyMessage)
+                    .font(.system(size: 26, weight: .medium))
+                    .multilineTextAlignment(.center)
+            }
+            .foregroundColor(.white.opacity(0.65))
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else {
+            ScrollView {
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 24), count: 6), spacing: 28) {
+                    ForEach(items) { meta in
+                        PosterCard(meta: meta, onClick: { onSelect(meta) })
+                    }
+                }
+                .padding(.vertical, 12)
+            }
+        }
+    }
+
+    private var emptyMessage: String {
+        guard let folder else { return "This collection folder is no longer available." }
+        let providers = Set(folder.sources.map { $0.provider.lowercased() })
+        if providers.contains("tmdb") || providers.contains("trakt") {
+            return "This folder uses a TMDB or Trakt source that is not available on tvOS yet."
+        }
+        return "No titles are currently available in this folder."
+    }
+
+    @MainActor
+    private func load() async {
+        guard let folder else {
+            isLoading = false
+            return
+        }
+        items = await repository.getCollectionFolderItems(sources: folder.addonCatalogSources, limit: 120)
+        isLoading = false
+    }
 }
 
 /// User-controlled ordering of Home rows (Settings → Layout → Home Catalogs).
@@ -2072,14 +2220,14 @@ private struct TVCatalogRow: View {
                     let progressItem = progressByItemId[item.id]
                     PosterCard(
                         meta: item,
-                        isLandscape: homeLayout == "Modern" && landscapeFocusedId == cardKey,
+                        isLandscape: item.type != "collection_folder" && homeLayout == "Modern" && landscapeFocusedId == cardKey,
                         continueProgress: progressItem?.progress,
                         continueRemainingText: progressItem?.remainingText,
                         continueEpisodeText: progressItem?.episodeLabel,
                         continueEpisodeTitleText: progressItem?.episodeVideo?.title,
                         continueIsUpNext: progressItem?.isUpNextEntry == true,
                         continueUpNextBadgeText: progressItem?.upNextBadgeText,
-                        showsWatchedBadge: id != TVHomeSection.continueWatchingId,
+                        showsWatchedBadge: id != TVHomeSection.continueWatchingId && item.type != "collection_folder",
                         shouldRequestInitialFocus: shouldRequestInitialFocus,
                         onInitialFocusRequested: shouldRequestInitialFocus ? onInitialFocusRequested : nil,
                         onFocus: { focused in

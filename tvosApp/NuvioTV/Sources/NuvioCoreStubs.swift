@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import TVServices
 
 // MARK: - Stub types replacing NuvioCore Rust FFI types
 
@@ -78,7 +79,7 @@ public class ProfileManager {
     static let profilesChangedNotification = Notification.Name("nuvio.tv.profiles.changed")
 
     private static let profilesKey = "nuvio.profiles"
-    private static let activePinKey = "nuvio.active_profile_id"
+    private static let activeProfileKey = "nuvio.active_profile_id"
     private static let maxProfiles = 6
 
     public init(baseDir: String) throws {
@@ -110,14 +111,20 @@ public class ProfileManager {
 
     public func getActiveProfile() throws -> Profile? {
         let profiles = (try? getProfiles()) ?? []
-        if let id = UserDefaults.standard.string(forKey: Self.activePinKey) {
+        if let id = UserDefaults.standard.string(forKey: Self.activeProfileKey) {
             return profiles.first(where: { $0.id == id })
+        }
+        // With Runs as Current User enabled, standard defaults are partitioned
+        // by Apple TV user. Require one explicit choice for a user without a
+        // saved Nuvio profile instead of silently mapping them to profile 1.
+        if TVUserManager().shouldStorePreferencesForCurrentUser {
+            return nil
         }
         return profiles.first
     }
 
     public func switchProfile(id: String) throws {
-        UserDefaults.standard.set(id, forKey: Self.activePinKey)
+        UserDefaults.standard.set(id, forKey: Self.activeProfileKey)
     }
 
     public func deleteProfile(id: String) throws {
@@ -135,12 +142,16 @@ public class ProfileManager {
 
     public func replaceProfiles(_ profiles: [Profile]) throws {
         saveProfiles(profiles)
-        if let activeId = UserDefaults.standard.string(forKey: Self.activePinKey),
+        if let activeId = UserDefaults.standard.string(forKey: Self.activeProfileKey),
            profiles.contains(where: { $0.id == activeId }) {
             return
         }
+        UserDefaults.standard.removeObject(forKey: Self.activeProfileKey)
+        if TVUserManager().shouldStorePreferencesForCurrentUser {
+            return
+        }
         if let first = profiles.first {
-            UserDefaults.standard.set(first.id, forKey: Self.activePinKey)
+            UserDefaults.standard.set(first.id, forKey: Self.activeProfileKey)
         }
     }
 

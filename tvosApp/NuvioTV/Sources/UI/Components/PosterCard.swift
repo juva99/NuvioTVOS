@@ -146,11 +146,22 @@ struct PosterCard: View {
         ZStack {
             Rectangle()
                 .fill(Color.white.opacity(0.08))
-            Image(systemName: "photo")
-                .resizable()
-                .scaledToFit()
-                .frame(width: 42, height: 42)
-                .foregroundColor(.white.opacity(0.38))
+            if meta.type == "collection_folder" {
+                if let emoji = meta.description, !emoji.isEmpty {
+                    Text(emoji)
+                        .font(.system(size: 64))
+                } else {
+                    Image(systemName: "folder.fill")
+                        .font(.system(size: 52))
+                        .foregroundColor(.white.opacity(0.38))
+                }
+            } else {
+                Image(systemName: "photo")
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 42, height: 42)
+                    .foregroundColor(.white.opacity(0.38))
+            }
         }
     }
 
@@ -336,7 +347,7 @@ struct PosterCard: View {
     }
 
     private var showsPosterTitle: Bool {
-        posterLabels && !isLandscape
+        (posterLabels || meta.type == "collection_folder") && !isLandscape
     }
     #else
     private var cardWidth: CGFloat {
