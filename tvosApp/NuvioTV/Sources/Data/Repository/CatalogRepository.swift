@@ -736,11 +736,11 @@ final class CinemetaCatalogRepository: CatalogRepository {
         let yearName = media == "tv" ? "first_air_date_year" : "year"
         let values: [(String, String?)] = [
             ("with_genres", filters.withGenres), ("\(datePrefix).gte", filters.releaseDateGte),
-            ("\(datePrefix).lte", filters.releaseDateLte), ("vote_average.gte", filters.voteAverageGte.map(String.init)),
-            ("vote_average.lte", filters.voteAverageLte.map(String.init)), ("vote_count.gte", filters.voteCountGte.map(String.init)),
+            ("\(datePrefix).lte", filters.releaseDateLte), ("vote_average.gte", filters.voteAverageGte.map { String($0) }),
+            ("vote_average.lte", filters.voteAverageLte.map { String($0) }), ("vote_count.gte", filters.voteCountGte.map { String($0) }),
             ("with_original_language", filters.withOriginalLanguage), ("with_origin_country", filters.withOriginCountry),
             ("with_keywords", filters.withKeywords), ("with_companies", filters.withCompanies),
-            ("with_networks", filters.withNetworks), (yearName, filters.year.map(String.init)),
+            ("with_networks", filters.withNetworks), (yearName, filters.year.map { String($0) }),
             ("watch_region", filters.withWatchProviders == nil ? filters.watchRegion : filters.watchRegion ?? "US"),
             ("with_watch_providers", filters.withWatchProviders),
             ("with_watch_monetization_types", filters.withWatchProviders == nil ? nil : "flatrate|free|ads|rent|buy")
