@@ -441,27 +441,30 @@ struct SkipSegmentOverlay: View {
     let onSkip: () -> Void
 
     var body: some View {
-        HStack(spacing: 16) {
-            Image(systemName: "forward.end.fill")
-                .font(.system(size: 24, weight: .bold))
-                .foregroundColor(isFocused ? .black : .white)
-                .frame(width: 46, height: 46)
-                .background {
-                    Circle().fill(isFocused ? Color.white : Color.white.opacity(0.14))
+        Button(action: onSkip) {
+            HStack(spacing: 16) {
+                Image(systemName: "forward.end.fill")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundColor(isFocused ? .black : .white)
+                    .frame(width: 46, height: 46)
+                    .background {
+                        Circle().fill(isFocused ? Color.white : Color.white.opacity(0.14))
+                    }
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(interval.label)
+                        .font(.system(size: 26, weight: .bold))
+                        .foregroundColor(.white)
+                    Text(detailText)
+                        .font(.system(size: 18, weight: .medium))
+                        .foregroundColor(.white.opacity(0.62))
+                        .contentTransition(.numericText())
                 }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text(interval.label)
-                    .font(.system(size: 26, weight: .bold))
-                    .foregroundColor(.white)
-                Text(detailText)
-                    .font(.system(size: 18, weight: .medium))
-                    .foregroundColor(.white.opacity(0.62))
-                    .contentTransition(.numericText())
+                Spacer(minLength: 10)
             }
-
-            Spacer(minLength: 10)
         }
+        .buttonStyle(.plain)
         .padding(.leading, 18)
         .padding(.trailing, 20)
         .padding(.vertical, 14)

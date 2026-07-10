@@ -629,17 +629,17 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
         for source in sources {
             guard items.count < limit else { break }
-            guard let base = await baseURL(for: source) else {
+            guard let resolved = await resolvedCatalog(for: source) else {
                 print("Collection catalog not found: \(source.addonId) \(source.type)/\(source.catalogId)")
                 continue
             }
             do {
-                var path = "catalog/\(source.type)/\(source.catalogId)"
+                var path = "catalog/\(source.type)/\(resolved.catalogId)"
                 if let genreExtra = source.genre.flatMap({ encodedExtra(name: "genre", value: $0) }) {
                     path += "/" + genreExtra
                 }
                 path += ".json"
-                let response: CinemetaCatalogResponse = try await fetch(base.appendingPathComponent(path))
+                let response: CinemetaCatalogResponse = try await fetch(resolved.baseURL.appendingPathComponent(path))
                 for meta in response.metas.map({ $0.toMeta(fallbackType: source.type) }) {
                     guard items.count < limit else { break }
                     guard seen.insert(meta.id).inserted else { continue }
@@ -654,23 +654,25 @@ final class CinemetaCatalogRepository: CatalogRepository {
         return items
     }
 
-    private func baseURL(for source: NuvioCollectionCatalogSource) async -> URL? {
-        if source.addonId == Self.cinemetaAddonId { return baseURL }
+    private func resolvedCatalog(for source: NuvioCollectionCatalogSource) async -> (baseURL: URL, catalogId: String)? {
+        let sourceCatalogId = source.catalogId.split(separator: ",").first.map(String.init) ?? source.catalogId
+        if source.addonId == Self.cinemetaAddonId || source.addonId.lowercased().contains("cinemeta") {
+            return (baseURL, sourceCatalogId)
+        }
 
-        var catalogFallback: URL?
+        var catalogFallback: (baseURL: URL, catalogId: String)?
         for manifestURL in Self.configuredStreamAddonManifestURLs {
             guard let manifest = await manifest(for: manifestURL) else { continue }
-            let sourceCatalogId = source.catalogId.split(separator: ",").first.map(String.init) ?? source.catalogId
-            let hasCatalog = manifest.catalogs?.contains { catalog in
+            let matchedCatalog = manifest.catalogs?.first { catalog in
                 catalog.type.caseInsensitiveCompare(source.type) == .orderedSame &&
                 (catalog.id == source.catalogId || catalog.id == sourceCatalogId)
-            } == true
+            }
             let transportBase = manifestURL.deletingLastPathComponent()
             if manifest.id == source.addonId {
-                return transportBase
+                return (transportBase, matchedCatalog?.id ?? sourceCatalogId)
             }
-            if hasCatalog, catalogFallback == nil {
-                catalogFallback = transportBase
+            if let matchedCatalog, catalogFallback == nil {
+                catalogFallback = (transportBase, matchedCatalog.id)
             }
         }
         return catalogFallback

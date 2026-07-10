@@ -336,7 +336,7 @@ struct NuvioStream: Identifiable, Codable {
             url: url,
             name: displayName,
             description: details.joined(separator: "\n"),
-            addonName: "TB Instant",
+            addonName: addonName,
             subtitles: subtitles,
             addonLogoURL: addonLogoURL,
             infoHash: infoHash,

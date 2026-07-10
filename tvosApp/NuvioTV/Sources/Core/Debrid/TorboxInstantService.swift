@@ -19,8 +19,8 @@ struct TorboxInstantService {
             .trimmingCharacters(in: .whitespacesAndNewlines)
         guard !key.isEmpty else { return streams }
 
-        let direct = streams.filter { !$0.isDebridResolvable || $0.addonName == "TB Instant" }
-        let torrents = streams.filter { $0.isDebridResolvable && $0.addonName != "TB Instant" }
+        let direct = streams.filter { !$0.isDebridResolvable || $0.isTorboxInstant }
+        let torrents = streams.filter { $0.isDebridResolvable && !$0.isTorboxInstant }
         let hashes = Array(Set(torrents.compactMap { $0.infoHash?.lowercased() })).sorted()
         guard !hashes.isEmpty else { return streams }
 
@@ -56,6 +56,12 @@ struct TorboxInstantService {
         } catch {
             return nil
         }
+    }
+}
+
+private extension NuvioStream {
+    var isTorboxInstant: Bool {
+        name?.localizedCaseInsensitiveContains("TB Instant") == true
     }
 }
 

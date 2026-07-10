@@ -277,8 +277,6 @@ struct PlayerView: View {
                     isFocused: skipSegmentFocused,
                     onSkip: { viewModel.skipActiveInterval() }
                 )
-                .onTapGesture { viewModel.skipActiveInterval() }
-                .focusable(true)
                 .focused($skipSegmentFocused)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
                 .padding(.leading, 60)
