@@ -830,6 +830,8 @@ struct NuvioCollectionFolder: Codable, Identifiable {
     /// Legacy pre-`sources` field still present in old blobs.
     var catalogSources: [NuvioCollectionCatalogSource]
     var cardId: String { "collection-folder:\(id)" }
+    var tileShape: NuvioCollectionTileShape
+    var hideTitle: Bool
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -839,6 +841,8 @@ struct NuvioCollectionFolder: Codable, Identifiable {
         coverEmoji = try c.decodeIfPresent(String.self, forKey: .coverEmoji)
         sources = try c.decodeIfPresent([NuvioCollectionSource].self, forKey: .sources) ?? []
         catalogSources = try c.decodeIfPresent([NuvioCollectionCatalogSource].self, forKey: .catalogSources) ?? []
+        tileShape = try c.decodeIfPresent(NuvioCollectionTileShape.self, forKey: .tileShape) ?? .square
+        hideTitle = try c.decodeIfPresent(Bool.self, forKey: .hideTitle) ?? false
     }
 
     /// Add-on backed catalog sources, merging the modern `sources` array with
@@ -855,6 +859,26 @@ struct NuvioCollectionFolder: Codable, Identifiable {
         merged.append(contentsOf: catalogSources)
         return merged
     }
+}
+
+enum NuvioCollectionTileShape: String, Codable {
+    case poster
+    case landscape
+    case square
+
+    init(from decoder: Decoder) throws {
+        let value = try decoder.singleValueContainer().decode(String.self).lowercased()
+        switch value {
+        case "poster": self = .poster
+        case "landscape", "wide": self = .landscape
+        default: self = .square
+        }
+    }
+}
+
+struct NuvioCollectionFolderCardStyle {
+    let tileShape: NuvioCollectionTileShape
+    let hideTitle: Bool
 }
 
 struct NuvioCollectionSource: Codable {

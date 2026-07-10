@@ -11,6 +11,7 @@ import SwiftUI
 /// Poster card component with focus animation (tvOS) and tap handling (iOS)
 struct PosterCard: View {
     let meta: NuvioMeta
+    var collectionFolderStyle: NuvioCollectionFolderCardStyle? = nil
     var isLandscape: Bool = false
     var continueProgress: Double? = nil
     var continueRemainingText: String? = nil
@@ -286,6 +287,9 @@ struct PosterCard: View {
 
     #if os(tvOS)
     private var cardWidth: CGFloat {
+        if collectionFolderStyle?.tileShape == .landscape {
+            return (homeLayout == "Compact" ? 170 : 210) * 16 / 9
+        }
         if isLandscape {
             return 560
         }
@@ -298,10 +302,16 @@ struct PosterCard: View {
     /// vertical navigation onto the neighbouring column. The 560pt landscape art
     /// overflows this frame to the right and is drawn above siblings (zIndex).
     private var layoutWidth: CGFloat {
-        homeLayout == "Compact" ? 170 : 210
+        cardWidth
     }
 
     private var cardHeight: CGFloat {
+        if let shape = collectionFolderStyle?.tileShape {
+            switch shape {
+            case .poster: return homeLayout == "Compact" ? 255 : 315
+            case .landscape, .square: return homeLayout == "Compact" ? 170 : 210
+            }
+        }
         isLandscape ? 315 : (homeLayout == "Compact" ? 255 : 315)
     }
 
@@ -347,7 +357,8 @@ struct PosterCard: View {
     }
 
     private var showsPosterTitle: Bool {
-        (posterLabels || meta.type == "collection_folder") && !isLandscape
+        let showsFolderTitle = collectionFolderStyle.map { !$0.hideTitle } ?? false
+        return (posterLabels || showsFolderTitle) && !isLandscape
     }
     #else
     private var cardWidth: CGFloat {

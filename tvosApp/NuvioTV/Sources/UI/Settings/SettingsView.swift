@@ -442,19 +442,22 @@ struct SettingsView: View {
     let isAuthenticated: Bool
     let onSignIn: (() -> Void)?
     let onSignOut: (() -> Void)?
+    let onChangeAppleTVProfile: (() -> Void)?
 
     init(
         activeProfile: Profile? = nil,
         accountEmail: String? = nil,
         isAuthenticated: Bool = false,
         onSignIn: (() -> Void)? = nil,
-        onSignOut: (() -> Void)? = nil
+        onSignOut: (() -> Void)? = nil,
+        onChangeAppleTVProfile: (() -> Void)? = nil
     ) {
         self.activeProfile = activeProfile
         self.accountEmail = accountEmail
         self.isAuthenticated = isAuthenticated
         self.onSignIn = onSignIn
         self.onSignOut = onSignOut
+        self.onChangeAppleTVProfile = onChangeAppleTVProfile
     }
 
     @State private var selectedCategory: SettingsCategory = .account
@@ -610,7 +613,8 @@ struct SettingsView: View {
                 accountEmail: accountEmail,
                 isAuthenticated: isAuthenticated,
                 onSignIn: onSignIn,
-                onSignOut: onSignOut
+                onSignOut: onSignOut,
+                onChangeAppleTVProfile: onChangeAppleTVProfile
             )
         case .appearance:
             AppearanceSettingsView(accentColor: accentColor)
@@ -711,6 +715,7 @@ private struct AccountSettingsView: View {
     let isAuthenticated: Bool
     let onSignIn: (() -> Void)?
     let onSignOut: (() -> Void)?
+    let onChangeAppleTVProfile: (() -> Void)?
 
     @AppStorage(SettingsKey.profileName) private var profileName = "Nuvio User"
     @AppStorage(SettingsKey.profilePinEnabled) private var pinEnabled = false
@@ -745,15 +750,24 @@ private struct AccountSettingsView: View {
                 }
                 .padding(.bottom, 6)
 
-                // First focusable row in the pane carries the entry anchor —
-                // without one the entry lock leaves the pane unenterable.
+                SettingsActionRow(
+                    title: "Apple TV User Profile",
+                    subtitle: "Choose the Nuvio profile used automatically for the current Apple TV user",
+                    value: displayProfileName,
+                    accentColor: accentColor
+                ) {
+                    onChangeAppleTVProfile?()
+                }
+                .settingsEntryAnchor()
+                .opacity(onChangeAppleTVProfile != nil ? 1 : 0.46)
+                .disabled(onChangeAppleTVProfile == nil)
+
                 SettingsToggleRow(
                     title: "PIN Protection",
                     subtitle: "Require the profile PIN before opening protected profiles",
                     isOn: $pinEnabled,
                     accentColor: accentColor
                 )
-                .settingsEntryAnchor()
 
                 SettingsToggleRow(
                     title: "Open Last Profile",

@@ -947,7 +947,8 @@ private struct TVMainTabView: View {
                 accountEmail: accountEmail,
                 isAuthenticated: isAuthenticated,
                 onSignIn: onSignIn,
-                onSignOut: onSignOut
+                onSignOut: onSignOut,
+                onChangeAppleTVProfile: onSwitchProfile
             )
                 .tabItem {
                     Label(TVTab.settings.rawValue, systemImage: TVTab.settings.symbol)
@@ -1305,6 +1306,7 @@ struct TVHomeView: View {
                                         id: section.id,
                                         title: section.title,
                                         items: section.items,
+                                        collectionFolderStyles: section.collectionFolderStyles,
                                         progressByItemId: section.id == TVHomeSection.continueWatchingId ? continueWatchingByMetaId : [:],
                                         initialFocusCardKey: initialFocusCardKey,
                                         landscapeFocusedId: landscapeFocusedId,
@@ -1669,6 +1671,12 @@ struct TVHomeView: View {
                 collectionId: collection.id,
                 collectionFolderIdsByCardId: collection.folders.reduce(into: [:]) { result, folder in
                     result[folder.cardId] = folder.id
+                },
+                collectionFolderStyles: collection.folders.reduce(into: [:]) { result, folder in
+                    result[folder.cardId] = NuvioCollectionFolderCardStyle(
+                        tileShape: folder.tileShape,
+                        hideTitle: folder.hideTitle
+                    )
                 }
             )
         }
@@ -1812,6 +1820,7 @@ struct TVHomeSection: Identifiable {
     var isPinnedCollection: Bool = false
     var collectionId: String? = nil
     var collectionFolderIdsByCardId: [String: String] = [:]
+    var collectionFolderStyles: [String: NuvioCollectionFolderCardStyle] = [:]
 
     var isCollectionRow: Bool { id.hasPrefix(Self.collectionIdPrefix) }
     func folderId(for cardId: String) -> String? { collectionFolderIdsByCardId[cardId] }
@@ -2146,6 +2155,7 @@ private struct TVCatalogRow: View {
     let id: String
     let title: String
     let items: [NuvioMeta]
+    var collectionFolderStyles: [String: NuvioCollectionFolderCardStyle] = [:]
     var progressByItemId: [String: ContinueWatchingItem] = [:]
     /// Composite key ("<sectionId>\u{1}<metaId>") of the card that should take
     /// focus on appear — the first card on a fresh load, or the card the user
@@ -2180,11 +2190,6 @@ private struct TVCatalogRow: View {
         homeLayout == "Compact" ? 22 : 28
     }
 
-    // Step between successive (portrait) card leading edges. Only the focused
-    // card ever becomes landscape, and that never changes the leading edge of
-    // cards before it, so the step is always the portrait width + spacing.
-    private var step: CGFloat { compactPosterWidth + rowSpacing }
-
     // Card height (315) + vertical breathing room for the focus border/shadow.
     private var stripHeight: CGFloat {
         let imageHeight: CGFloat = homeLayout == "Compact" ? 255 : 315
@@ -2216,10 +2221,12 @@ private struct TVCatalogRow: View {
             HStack(alignment: .bottom, spacing: rowSpacing) {
                 ForEach(items) { item in
                     let cardKey = "\(id)\u{1}\(item.id)"
+                    let folderStyle = collectionFolderStyles[item.id]
                     let shouldRequestInitialFocus = cardKey == initialFocusCardKey
                     let progressItem = progressByItemId[item.id]
                     PosterCard(
                         meta: item,
+                        collectionFolderStyle: folderStyle,
                         isLandscape: item.type != "collection_folder" && homeLayout == "Modern" && landscapeFocusedId == cardKey,
                         continueProgress: progressItem?.progress,
                         continueRemainingText: progressItem?.remainingText,
@@ -2257,7 +2264,7 @@ private struct TVCatalogRow: View {
             // tvOS overrides ScrollViewReader.scrollTo (no-op once a card is
             // already on-screen, which the focus engine guarantees), so we
             // position manually -- mirroring the Android TV BringIntoViewSpec.
-            .offset(x: edgeInset + TVLayout.rowLeading - CGFloat(scrollIndex) * step)
+            .offset(x: edgeInset + TVLayout.rowLeading - leadingOffset(for: scrollIndex))
             .frame(width: stripWidth, height: stripHeight, alignment: .leading)
             .clipped()
             .offset(x: -edgeInset)
@@ -2265,6 +2272,21 @@ private struct TVCatalogRow: View {
             .animation(smoothFocus ? .spring(response: 0.18, dampingFraction: 0.86) : nil, value: landscapeFocusedId)
         }
         .frame(height: stripHeight)
+    }
+
+    private func leadingOffset(for index: Int) -> CGFloat {
+        guard index > 0 else { return 0 }
+        return items.prefix(index).reduce(0) { offset, item in
+            offset + cardWidth(for: item) + rowSpacing
+        }
+    }
+
+    private func cardWidth(for item: NuvioMeta) -> CGFloat {
+        guard let style = collectionFolderStyles[item.id] else { return compactPosterWidth }
+        switch style.tileShape {
+        case .landscape: return compactPosterWidth * 16 / 9
+        case .poster, .square: return compactPosterWidth
+        }
     }
 }
 

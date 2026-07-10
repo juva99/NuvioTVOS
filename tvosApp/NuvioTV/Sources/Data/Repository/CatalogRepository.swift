@@ -629,7 +629,10 @@ final class CinemetaCatalogRepository: CatalogRepository {
 
         for source in sources {
             guard items.count < limit else { break }
-            guard let base = await baseURL(forAddonId: source.addonId) else { continue }
+            guard let base = await baseURL(for: source) else {
+                print("Collection catalog not found: \(source.addonId) \(source.type)/\(source.catalogId)")
+                continue
+            }
             do {
                 var path = "catalog/\(source.type)/\(source.catalogId)"
                 if let genreExtra = source.genre.flatMap({ encodedExtra(name: "genre", value: $0) }) {
@@ -644,22 +647,33 @@ final class CinemetaCatalogRepository: CatalogRepository {
                     items.append(meta)
                 }
             } catch {
-                // One dead source must not empty the whole folder row.
+                print("Collection catalog failed: \(source.type)/\(source.catalogId): \(error.localizedDescription)")
                 continue
             }
         }
         return items
     }
 
-    private func baseURL(forAddonId addonId: String) async -> URL? {
-        if addonId == Self.cinemetaAddonId { return baseURL }
+    private func baseURL(for source: NuvioCollectionCatalogSource) async -> URL? {
+        if source.addonId == Self.cinemetaAddonId { return baseURL }
 
+        var catalogFallback: URL?
         for manifestURL in Self.configuredStreamAddonManifestURLs {
-            if let manifest = await manifest(for: manifestURL), manifest.id == addonId {
-                return manifestURL.deletingLastPathComponent()
+            guard let manifest = await manifest(for: manifestURL) else { continue }
+            let sourceCatalogId = source.catalogId.split(separator: ",").first.map(String.init) ?? source.catalogId
+            let hasCatalog = manifest.catalogs?.contains { catalog in
+                catalog.type.caseInsensitiveCompare(source.type) == .orderedSame &&
+                (catalog.id == source.catalogId || catalog.id == sourceCatalogId)
+            } == true
+            let transportBase = manifestURL.deletingLastPathComponent()
+            if manifest.id == source.addonId {
+                return transportBase
+            }
+            if hasCatalog, catalogFallback == nil {
+                catalogFallback = transportBase
             }
         }
-        return nil
+        return catalogFallback
     }
 
     private func fetchCatalog(

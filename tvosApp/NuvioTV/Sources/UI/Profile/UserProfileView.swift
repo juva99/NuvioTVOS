@@ -29,7 +29,7 @@ public struct UserProfileView: View {
 
                     Spacer().frame(height: 14)
 
-                    Text("Select a profile to continue")
+                    Text("Choose the Nuvio profile for this Apple TV user")
                         .font(.custom("Inter-Regular", size: 28))
                         .foregroundColor(.white.opacity(0.6))
 
