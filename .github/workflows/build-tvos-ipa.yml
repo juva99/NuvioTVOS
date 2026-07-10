@@ -40,6 +40,7 @@ jobs:
           curl --fail --location --retry 3 \
             --output MPVKit/Package.swift \
             https://raw.githubusercontent.com/mpvkit/MPVKit/0.41.0/Package.swift
+          rm -rf "$HOME/Library/Caches/org.swift.swiftpm/artifacts"
 
       - name: Build tvOS app
         working-directory: tvosApp
