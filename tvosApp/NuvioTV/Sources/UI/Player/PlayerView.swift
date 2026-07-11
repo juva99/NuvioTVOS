@@ -102,6 +102,30 @@ struct RoutedPlayerView: View {
                 )
             }
         }
+        .overlay {
+            if let playbackStage {
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(1.5)
+                    Text(playbackStage)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 34)
+                .padding(.vertical, 26)
+                .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 24))
+                .allowsHitTesting(false)
+            }
+        }
+        .onChange(of: activeEngine) { engine in
+            if engine == .mpvKit {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if activeEngine == .mpvKit { playbackStage = nil }
+                }
+            }
+        }
     }
 }
 
@@ -198,31 +222,6 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
                 self.fail()
             }
         }
-        .overlay {
-            if let playbackStage {
-                VStack(spacing: 20) {
-                    ProgressView()
-                        .progressViewStyle(.circular)
-                        .scaleEffect(1.5)
-                    Text(playbackStage)
-                        .font(.headline)
-                        .foregroundStyle(.white)
-                        .multilineTextAlignment(.center)
-                }
-                .padding(.horizontal, 34)
-                .padding(.vertical, 26)
-                .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 24))
-                .allowsHitTesting(false)
-            }
-        }
-        .onChange(of: activeEngine) { engine in
-            if engine == .mpvKit {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                    if activeEngine == .mpvKit { playbackStage = nil }
-                }
-            }
-        }
-
         private func observe(item: AVPlayerItem, resumeFrom: Double?) {
             statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                 guard let self else { return }
