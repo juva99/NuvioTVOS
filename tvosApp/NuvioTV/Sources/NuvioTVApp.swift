@@ -1648,7 +1648,7 @@ struct TVHomeView: View {
                     name: folder.title,
                     description: folder.coverEmoji,
                     posterUrl: folder.coverImageUrl,
-                    backgroundUrl: folder.coverImageUrl,
+                    backgroundUrl: folder.heroBackdropUrl ?? folder.coverImageUrl,
                     logoUrl: nil,
                     imdbId: nil,
                     tmdbId: nil,
@@ -2227,7 +2227,7 @@ private struct TVCatalogRow: View {
             let edgeInset = max(0, geo.frame(in: .global).minX)
             let stripWidth = geo.size.width + edgeInset * 2
 
-            HStack(alignment: .bottom, spacing: rowSpacing) {
+            HStack(alignment: .top, spacing: rowSpacing) {
                 ForEach(items) { item in
                     let cardKey = "\(id)\u{1}\(item.id)"
                     let folderStyle = collectionFolderStyles[item.id]

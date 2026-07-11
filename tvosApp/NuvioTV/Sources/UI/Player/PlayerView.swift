@@ -114,7 +114,9 @@ private struct KSNativePlayerView: UIViewControllerRepresentable {
         private var ksPlayer: KSAVPlayer?
         private var statusTimer: Timer?
         private var endObserver: NSObjectProtocol?
+        private var failureObserver: NSObjectProtocol?
         private var didStart = false
+        private var didFail = false
         private let onFailure: () -> Void
         private let onFinished: (() -> Void)?
 
@@ -130,6 +132,14 @@ private struct KSNativePlayerView: UIViewControllerRepresentable {
                 switch item.status {
                 case .readyToPlay:
                     guard !self.didStart else { return }
+                    let hasPlayableVideo = item.tracks.contains {
+                        $0.assetTrack?.mediaType == .video && $0.assetTrack?.isPlayable == true
+                    }
+                    guard hasPlayableVideo else {
+                        timer.invalidate()
+                        self.fail()
+                        return
+                    }
                     self.didStart = true
                     if let resumeFrom, resumeFrom > 0 {
                         player.currentPlaybackTime = resumeFrom
@@ -137,23 +147,38 @@ private struct KSNativePlayerView: UIViewControllerRepresentable {
                     player.play()
                 case .failed:
                     timer.invalidate()
-                    self.onFailure()
+                    self.fail()
                 default:
                     break
                 }
             }
+            player.prepareToPlay()
+            guard let item = player.player.currentItem else {
+                fail()
+                return
+            }
             endObserver = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemDidPlayToEndTime,
-                object: nil,
+                object: item,
                 queue: .main
             ) { [weak self] _ in self?.onFinished?() }
-            player.prepareToPlay()
+            failureObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemFailedToPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in self?.fail() }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self, weak player] in
                 guard let self, let player, !self.didStart,
                       player.player.currentItem?.status != .readyToPlay else { return }
-                self.onFailure()
+                self.fail()
             }
+        }
+
+        private func fail() {
+            guard !didFail else { return }
+            didFail = true
+            onFailure()
         }
 
         func shutdown() {
@@ -161,6 +186,8 @@ private struct KSNativePlayerView: UIViewControllerRepresentable {
             statusTimer = nil
             if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
             endObserver = nil
+            if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+            failureObserver = nil
             ksPlayer?.shutdown()
             ksPlayer = nil
         }

@@ -836,6 +836,7 @@ struct NuvioCollectionFolder: Codable, Identifiable {
     let id: String
     let title: String
     var coverImageUrl: String?
+    var heroBackdropUrl: String?
     var coverEmoji: String?
     var sources: [NuvioCollectionSource]
     /// Legacy pre-`sources` field still present in old blobs.
@@ -849,6 +850,7 @@ struct NuvioCollectionFolder: Codable, Identifiable {
         id = try c.decode(String.self, forKey: .id)
         title = try c.decode(String.self, forKey: .title)
         coverImageUrl = try c.decodeIfPresent(String.self, forKey: .coverImageUrl)
+        heroBackdropUrl = try c.decodeIfPresent(String.self, forKey: .heroBackdropUrl)
         coverEmoji = try c.decodeIfPresent(String.self, forKey: .coverEmoji)
         sources = try c.decodeIfPresent([NuvioCollectionSource].self, forKey: .sources) ?? []
         catalogSources = try c.decodeIfPresent([NuvioCollectionCatalogSource].self, forKey: .catalogSources) ?? []
@@ -870,6 +872,7 @@ struct NuvioCollectionFolder: Codable, Identifiable {
         merged.append(contentsOf: catalogSources)
         return merged
     }
+
 }
 
 enum NuvioCollectionTileShape: String, Codable {

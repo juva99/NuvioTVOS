@@ -1249,11 +1249,11 @@ private struct CinemetaMeta: Decodable {
     let genres: [String]?
     let genre: [String]?
     let releaseInfo: String?
-    let year: String?
+    let year: FlexibleString?
     let runtime: String?
     let cast: [String]?
-    let director: [String]?
-    let writer: [String]?
+    let director: FlexibleStringArray?
+    let writer: FlexibleStringArray?
     let country: String?
     let released: String?
     let moviedbId: Int?
@@ -1283,11 +1283,11 @@ private struct CinemetaMeta: Decodable {
             year: parsedYear,
             genres: genres ?? genre,
             rating: Double(imdbRating ?? ""),
-            releaseInfo: releaseInfo ?? year,
+            releaseInfo: releaseInfo ?? year?.value,
             runtime: runtime,
             cast: cast,
-            director: director,
-            writer: writer,
+            director: director?.values,
+            writer: writer?.values,
             certification: nil,
             country: country,
             released: released,
@@ -1305,7 +1305,7 @@ private struct CinemetaMeta: Decodable {
     }
 
     private var parsedYear: Int? {
-        let source = releaseInfo ?? year ?? released
+        let source = releaseInfo ?? year?.value ?? released
         guard let source else { return nil }
         let digits = source.prefix(4)
         return Int(digits)
@@ -1377,6 +1377,26 @@ private struct FlexibleString: Decodable {
             value = double == double.rounded() ? String(Int(double)) : String(double)
         } else {
             value = ""
+        }
+    }
+}
+
+/// Stremio add-ons inconsistently encode crew fields as either arrays or
+/// comma-separated strings. Normalize both forms without rejecting the catalog.
+private struct FlexibleStringArray: Decodable {
+    let values: [String]
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.singleValueContainer()
+        if let array = try? container.decode([String].self) {
+            values = array
+        } else if let string = try? container.decode(String.self) {
+            values = string
+                .split(separator: ",")
+                .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        } else {
+            values = []
         }
     }
 }

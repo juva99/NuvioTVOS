@@ -559,6 +559,17 @@ final class TraktAuthService {
         )
     }
 
+    func fetchCollectionListItems(
+        listId: Int,
+        mediaType: String,
+        sortBy: String,
+        sortHow: String
+    ) async throws -> [NuvioMeta] {
+        let path = "lists/\(listId)/items/\(mediaType)?extended=full,images&limit=100&sort_by=\(sortBy)&sort_how=\(sortHow)"
+        let items: [TraktCollectionListItem] = try await authorizedGet(path: path)
+        return items.compactMap { $0.meta(for: mediaType) }
+    }
+
     private func authorizedGet<T: Decodable>(path: String) async throws -> T {
         guard await refreshTokenIfNeeded(), let token = currentState().accessToken else {
             throw TraktServiceError.message("Not authenticated with Trakt.")
@@ -636,6 +647,74 @@ final class TraktAuthService {
         }
         return nil
     }
+}
+
+private struct TraktCollectionListItem: Decodable {
+    let movie: TraktCollectionMedia?
+    let show: TraktCollectionMedia?
+
+    func meta(for mediaType: String) -> NuvioMeta? {
+        (mediaType == "show" ? show : movie)?.toMeta(type: mediaType == "show" ? "series" : "movie")
+    }
+}
+
+private struct TraktCollectionMedia: Decodable {
+    let title: String?
+    let year: Int?
+    let overview: String?
+    let released: String?
+    let firstAired: String?
+    let rating: Double?
+    let genres: [String]?
+    let ids: TraktCollectionIds?
+    let images: TraktCollectionImages?
+
+    enum CodingKeys: String, CodingKey {
+        case title, year, overview, released, rating, genres, ids, images
+        case firstAired = "first_aired"
+    }
+
+    func toMeta(type: String) -> NuvioMeta? {
+        guard let title, let ids else { return nil }
+        let id = ids.imdb ?? ids.tmdb.map { "tmdb:\($0)" } ?? ids.trakt.map { "trakt:\($0)" }
+        guard let id else { return nil }
+        let date = type == "series" ? firstAired : released
+        return NuvioMeta(
+            id: id,
+            name: title,
+            description: overview,
+            posterUrl: images?.posters?.first,
+            backgroundUrl: images?.fanart?.first ?? images?.backgrounds?.first,
+            logoUrl: images?.logos?.first,
+            imdbId: ids.imdb,
+            tmdbId: ids.tmdb,
+            type: type,
+            year: year,
+            genres: genres,
+            rating: rating,
+            releaseInfo: year.map { String($0) },
+            runtime: nil,
+            cast: nil,
+            director: nil,
+            writer: nil,
+            certification: nil,
+            country: nil,
+            released: date
+        )
+    }
+}
+
+private struct TraktCollectionIds: Decodable {
+    let trakt: Int?
+    let imdb: String?
+    let tmdb: Int?
+}
+
+private struct TraktCollectionImages: Decodable {
+    let fanart: [String]?
+    let posters: [String]?
+    let logos: [String]?
+    let backgrounds: [String]?
 }
 
 private struct EmptyResponse: Decodable {}
