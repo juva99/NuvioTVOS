@@ -160,6 +160,7 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
         private var cancellables: Set<AnyCancellable> = []
         private var itemObservation: NSKeyValueObservation?
         private var statusObservation: NSKeyValueObservation?
+        private var timeControlObservation: NSKeyValueObservation?
         private var endObserver: NSObjectProtocol?
         private var failureObserver: NSObjectProtocol?
         private var startupTimer: Timer?
@@ -214,6 +215,25 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
             itemObservation = model.player.observe(\.currentItem, options: [.new]) { [weak self] player, _ in
                 guard let self, let item = player.currentItem else { return }
                 Task { @MainActor in self.observe(item: item, resumeFrom: resumeFrom) }
+            }
+            timeControlObservation = model.player.observe(
+                \.timeControlStatus,
+                options: [.initial, .new]
+            ) { [weak self] player, _ in
+                Task { @MainActor in
+                    guard let self, self.didResume, self.startupTimer != nil else { return }
+                    switch player.timeControlStatus {
+                    case .waitingToPlayAtSpecifiedRate:
+                        let reason = player.reasonForWaitingToPlay.map(Self.waitingReason) ?? "buffering"
+                        self.onStageChange("Waiting for first video frame...\n\(reason)")
+                    case .paused:
+                        self.onStageChange("Waiting for first video frame...\nplayer paused")
+                    case .playing:
+                        self.onStageChange("Waiting for first video frame...\ndecoder started")
+                    @unknown default:
+                        break
+                    }
+                }
             }
             model.open(remoteURL: url)
 
@@ -311,11 +331,22 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
             return "Inspecting MKV... \(bytes) at \(rate)/s"
         }
 
+        private static func waitingReason(_ reason: AVPlayer.WaitingReason) -> String {
+            switch reason {
+            case .evaluatingBufferingRate: return "evaluating buffer"
+            case .toMinimizeStalls: return "buffering to avoid stalls"
+            case .noItemToPlay: return "no playable item"
+            default: return reason.rawValue
+            }
+        }
+
         func shutdown() {
             itemObservation?.invalidate()
             itemObservation = nil
             statusObservation?.invalidate()
             statusObservation = nil
+            timeControlObservation?.invalidate()
+            timeControlObservation = nil
             if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
             endObserver = nil
             if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }

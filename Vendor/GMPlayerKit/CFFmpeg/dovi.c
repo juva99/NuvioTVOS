@@ -217,7 +217,7 @@ int gm_dovi_converter_configure_output(const GMDoviConverter *converter, AVCodec
         av_free(config);
         return AVERROR(ENOMEM);
     }
-    codecpar->codec_tag = MKTAG('d', 'v', 'h', '1');
+    codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
     return 0;
 }
 

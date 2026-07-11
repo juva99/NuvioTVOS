@@ -213,9 +213,7 @@ public final class GMStreamSession {
     private var videoHLSCodec: String {
         guard let v = tracks.first(where: { $0.kind == .video }) else { return "hvc1" }
         switch v.codec {
-        case "hevc": return color.doviProfile == 7
-            ? String(format: "dvh1.08.%02d", color.doviLevel)
-            : "hvc1"
+        case "hevc": return "hvc1"
         case "h264": return "avc1"
         default: return "hvc1"
         }
@@ -304,6 +302,9 @@ public final class GMStreamSession {
         // AVPlayer rejects the variant (-12927).
         let rc = resolvedColor
         s += ",VIDEO-RANGE=\(rc.isHDR ? (rc.isHLG ? "HLG" : "PQ") : "SDR")"
+        if color.doviProfile == 7 {
+            s += String(format: ",SUPPLEMENTAL-CODECS=\"dvh1.08.%02d/db1p\"", color.doviLevel)
+        }
         if !auds.isEmpty { s += ",AUDIO=\"aud\"" }
         if !subs.isEmpty { s += ",SUBTITLES=\"subs\"" }
         s += "\n\(base)/video/index.m3u8\n"
