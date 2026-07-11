@@ -1170,15 +1170,6 @@ private struct VerticalEdgeClip: Shape {
     }
 }
 
-/// Collects each home row's top Y (in the rows' own coordinate space) so the
-/// manual vertical offset can glide the focused row flush under the hero.
-private struct HomeRowTopsKey: PreferenceKey {
-    static var defaultValue: [Int: CGFloat] = [:]
-    static func reduce(value: inout [Int: CGFloat], nextValue: () -> [Int: CGFloat]) {
-        value.merge(nextValue()) { _, new in new }
-    }
-}
-
 struct TVHomeView: View {
     @ObservedObject var store: TVHomeStore
     let repository: CatalogRepository
@@ -1195,6 +1186,8 @@ struct TVHomeView: View {
     @AppStorage(SettingsKey.fastNavigation) private var fastNavigation = false
     @AppStorage(SettingsKey.hideUnreleased) private var hideUnreleased = false
     @AppStorage(SettingsKey.smoothFocus) private var smoothFocus = true
+    @AppStorage(SettingsKey.homeLayout) private var homeLayout = "Modern"
+    @AppStorage(SettingsKey.posterLabels) private var posterLabels = false
 
     @State private var isLoading = true
     @State private var focusedMeta: NuvioMeta?
@@ -1216,7 +1209,6 @@ struct TVHomeView: View {
     @State private var overlayRestoreCardID: String?
     @Environment(\.isEnabled) private var isEnabled
     @State private var focusedRowIndex = 0
-    @State private var rowTops: [Int: CGFloat] = [:]
     @State private var verticalOffset: CGFloat = 0
     @FocusState private var isLoadingFocusActive: Bool
     @FocusState private var focusedCardID: String?
@@ -1349,14 +1341,6 @@ struct TVHomeView: View {
                                         },
                                         onLongPress: section.isCollectionRow ? nil : onLongPressCard
                                     )
-                                    .background(
-                                        GeometryReader { rowGeo in
-                                            Color.clear.preference(
-                                                key: HomeRowTopsKey.self,
-                                                value: [index: rowGeo.frame(in: .named("homeRows")).minY.rounded()]
-                                            )
-                                        }
-                                    )
                                 }
                             }
                         }
@@ -1368,16 +1352,6 @@ struct TVHomeView: View {
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
                     .clipShape(VerticalEdgeClip())
-                    .onPreferenceChange(HomeRowTopsKey.self) { newTops in
-                        rowTops = newTops
-                        // Keep the focused row anchored if measurements settle or
-                        // sections load in -- recompute from the fresh values.
-                        if let focusedTop = newTops[focusedRowIndex] {
-                            let firstTop = newTops.values.min() ?? focusedTop
-                            let target = -(focusedTop - firstTop)
-                            if target != verticalOffset { verticalOffset = target }
-                        }
-                    }
                     // Treat the rows as a focus section so focus can jump in/out
                     // cleanly. The default focus is only armed after Home loses
                     // focus, so the first Menu press can still reach the sidebar,
@@ -1423,6 +1397,12 @@ struct TVHomeView: View {
             if loading {
                 requestLoadingFocus()
             }
+        }
+        .onChange(of: homeLayout) { _ in
+            verticalOffset = offsetForRow(focusedRowIndex)
+        }
+        .onChange(of: posterLabels) { _ in
+            verticalOffset = offsetForRow(focusedRowIndex)
         }
         .onChange(of: focusedCardID) { newValue in
             if let newValue {
@@ -1494,14 +1474,11 @@ struct TVHomeView: View {
         return "\(sectionId)\u{1}\(first.id)"
     }
 
-    /// Vertical translation that lands the row at `index` where the first row
-    /// sits (flush under the hero) -- the vertical analog of the card strip
-    /// pinning the focused card under the row title. Returns the current offset
-    /// when that row hasn't been measured yet, so we never jump to 0 mid-scroll.
     private func offsetForRow(_ index: Int) -> CGFloat {
-        guard let focusedTop = rowTops[index] else { return verticalOffset }
-        let firstTop = rowTops.values.min() ?? focusedTop
-        return -(focusedTop - firstTop)
+        let imageHeight: CGFloat = homeLayout == "Compact" ? 255 : 315
+        let stripHeight = imageHeight + (posterLabels ? 48 : 0) + 56
+        let rowHeight = 36 + 10 + stripHeight
+        return -CGFloat(index) * (rowHeight + 28)
     }
 
     private var visibleSections: [TVHomeSection] {
@@ -1512,10 +1489,10 @@ struct TVHomeView: View {
         )
         let allSections = continueWatching.isEmpty ? store.sections : [resumeSection] + store.sections
 
-        return allSections.map { section in
+        return allSections.compactMap { section in
             var visible = section
             visible.items = section.items.filter(isVisible)
-            return visible
+            return visible.items.isEmpty ? nil : visible
         }
     }
 
@@ -1840,7 +1817,7 @@ private struct CollectionFolderView: View {
     let onSelect: (NuvioMeta) -> Void
     let onBack: () -> Void
 
-    @State private var items: [NuvioMeta] = []
+    @State private var sections: [CollectionFolderSection] = []
     @State private var isLoading = true
 
     private var collection: NuvioCollection? {
@@ -1876,7 +1853,7 @@ private struct CollectionFolderView: View {
                 .scaleEffect(1.4)
                 .tint(.white)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else if items.isEmpty {
+        } else if sections.isEmpty {
             VStack(spacing: 16) {
                 Image(systemName: "rectangle.stack.badge.exclamationmark")
                     .font(.system(size: 56))
@@ -1887,13 +1864,27 @@ private struct CollectionFolderView: View {
             .foregroundColor(.white.opacity(0.65))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         } else {
-            ScrollView {
-                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 24), count: 6), spacing: 28) {
-                    ForEach(items) { meta in
-                        PosterCard(meta: meta, onClick: { onSelect(meta) })
+            ScrollView(.vertical) {
+                LazyVStack(alignment: .leading, spacing: 34) {
+                    ForEach(sections) { section in
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text(section.title)
+                                .font(.custom("Inter-Bold", size: 28))
+                                .foregroundColor(.white)
+
+                            ScrollView(.horizontal) {
+                                LazyHStack(alignment: .top, spacing: 24) {
+                                    ForEach(section.items) { meta in
+                                        PosterCard(meta: meta, onClick: { onSelect(meta) })
+                                    }
+                                }
+                                .padding(.vertical, 18)
+                            }
+                            .scrollClipDisabledIfAvailable()
+                        }
                     }
                 }
-                .padding(.vertical, 12)
+                .padding(.vertical, 8)
             }
         }
     }
@@ -1919,7 +1910,7 @@ private struct CollectionFolderView: View {
             isLoading = false
             return
         }
-        items = await repository.getCollectionFolderItems(folder: folder, limit: 120)
+        sections = await repository.getCollectionFolderSections(folder: folder, limitPerSection: 40)
         isLoading = false
     }
 }
@@ -2211,6 +2202,7 @@ private struct TVCatalogRow: View {
                 .font(.custom("Inter-Bold", size: 30))
                 .foregroundColor(.white)
                 .padding(.leading, TVLayout.rowLeading)
+                .frame(height: 36, alignment: .leading)
 
             cardStrip
         }

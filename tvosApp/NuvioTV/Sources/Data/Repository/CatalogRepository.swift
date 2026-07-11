@@ -53,7 +53,13 @@ protocol CatalogRepository {
     func getGenres(contentType: String) async throws -> [String]
 
     /// Resolve the same add-on, TMDB, and Trakt collection sources as Android TV.
-    func getCollectionFolderItems(folder: NuvioCollectionFolder, limit: Int) async -> [NuvioMeta]
+    func getCollectionFolderSections(folder: NuvioCollectionFolder, limitPerSection: Int) async -> [CollectionFolderSection]
+}
+
+struct CollectionFolderSection: Identifiable {
+    let id: String
+    let title: String
+    let items: [NuvioMeta]
 }
 
 extension CatalogRepository {
@@ -626,10 +632,7 @@ final class CinemetaCatalogRepository: CatalogRepository {
         return manifest
     }
 
-    func getCollectionFolderItems(folder: NuvioCollectionFolder, limit: Int) async -> [NuvioMeta] {
-        var items: [NuvioMeta] = []
-        var seen = Set<String>()
-
+    func getCollectionFolderSections(folder: NuvioCollectionFolder, limitPerSection: Int) async -> [CollectionFolderSection] {
         var sources = folder.sources
         if sources.isEmpty {
             sources = folder.catalogSources.map { source in
@@ -643,22 +646,81 @@ final class CinemetaCatalogRepository: CatalogRepository {
             }
         }
 
-        for source in sources {
-            guard items.count < limit else { break }
+        var sections: [CollectionFolderSection] = []
+        for (index, source) in sources.enumerated() {
             let loaded: [NuvioMeta]
             switch source.provider.lowercased() {
             case "tmdb": loaded = await tmdbCollectionItems(source: source)
             case "trakt": loaded = await traktCollectionItems(source: source)
             default: loaded = await addonCollectionItems(source: source)
             }
-            for meta in loaded where items.count < limit {
+            var items: [NuvioMeta] = []
+            var seen = Set<String>()
+            for meta in loaded where items.count < limitPerSection {
                 guard seen.insert("\(meta.type):\(meta.id)").inserted else { continue }
                 cachedMetaById[meta.id] = meta
                 await CollectionFolderMetadataCache.shared.store(meta)
                 items.append(meta)
             }
+            guard !items.isEmpty else { continue }
+            sections.append(
+                CollectionFolderSection(
+                    id: "\(index):\(source.provider):\(source.addonId ?? ""):\(source.type ?? ""):\(source.catalogId ?? "")",
+                    title: await collectionSourceTitle(source),
+                    items: items
+                )
+            )
         }
-        return items
+        return sections
+    }
+
+    private func collectionSourceTitle(_ source: NuvioCollectionSource) async -> String {
+        if let title = source.title?.trimmingCharacters(in: .whitespacesAndNewlines), !title.isEmpty {
+            return title
+        }
+
+        let mediaLabel: String
+        switch source.type?.lowercased() {
+        case "movie": mediaLabel = "Movies"
+        case "series", "tv": mediaLabel = "Series"
+        case "anime": mediaLabel = "Anime"
+        default: mediaLabel = "Titles"
+        }
+
+        switch source.provider.lowercased() {
+        case "tmdb": return "TMDB \(mediaLabel)"
+        case "trakt": return "Trakt \(mediaLabel)"
+        default:
+            guard let addonId = source.addonId,
+                  let type = source.type,
+                  let catalogId = source.catalogId else { return mediaLabel }
+            let catalogSource = NuvioCollectionCatalogSource(
+                addonId: addonId,
+                type: type,
+                catalogId: catalogId,
+                genre: source.genre
+            )
+            if let catalog = await resolvedCatalogManifest(for: catalogSource) {
+                return "\(catalog.name ?? catalog.id) · \(mediaLabel)"
+            }
+            return "\(catalogId) · \(mediaLabel)"
+        }
+    }
+
+    private func resolvedCatalogManifest(
+        for source: NuvioCollectionCatalogSource
+    ) async -> AddonManifestCatalog? {
+        let sourceCatalogId = source.catalogId.split(separator: ",").first.map(String.init) ?? source.catalogId
+        for manifestURL in Self.configuredStreamAddonManifestURLs {
+            guard let manifest = await manifest(for: manifestURL) else { continue }
+            if let catalog = manifest.catalogs?.first(where: {
+                $0.type.caseInsensitiveCompare(source.type) == .orderedSame &&
+                ($0.id == source.catalogId || $0.id == sourceCatalogId)
+            }), manifest.id == source.addonId {
+                return catalog
+            }
+        }
+        return nil
     }
 
     private func addonCollectionItems(source: NuvioCollectionSource) async -> [NuvioMeta] {
@@ -1403,7 +1465,7 @@ private struct FlexibleStringArray: Decodable {
 
 /// Mock implementation for testing without Rust SDK
 class MockCatalogRepository: CatalogRepository {
-    func getCollectionFolderItems(folder: NuvioCollectionFolder, limit: Int) async -> [NuvioMeta] {
+    func getCollectionFolderSections(folder: NuvioCollectionFolder, limitPerSection: Int) async -> [CollectionFolderSection] {
         []
     }
 
