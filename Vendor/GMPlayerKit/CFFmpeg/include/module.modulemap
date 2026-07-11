@@ -1,4 +1,4 @@
 module CFFmpeg {
-    umbrella "."
+    header "gmremux.h"
     export *
 }

@@ -13,7 +13,7 @@
 //
 #include "gm_stream.h"
 #include "gm_ts.h"
-#include "gmdovi.h"
+#include "../CFFmpeg/gmdovi.h"
 
 #include <stdlib.h>
 #include <string.h>

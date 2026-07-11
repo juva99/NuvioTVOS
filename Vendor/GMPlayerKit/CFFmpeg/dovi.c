@@ -2,7 +2,6 @@
 
 #include <libavutil/dovi_meta.h>
 #include <libavutil/mem.h>
-#include <Libdovi/rpu_parser.h>
 
 struct GMDoviConverter {
     int profile;
@@ -31,11 +30,8 @@ int gm_dovi_converter_profile(const GMDoviConverter *converter) {
 int gm_dovi_converter_transform_packet(GMDoviConverter *converter, AVPacket *packet) {
     if (!converter || !packet || converter->profile != 7) return 0;
 
-    // Keep libdovi linked through the shared MPVKit dependency while packet NAL
-    // rewriting is completed. The converter must call this parser for each
-    // UNSPEC62 RPU before converting mode 2 (Profile 8.1) and reinjecting it.
-    DoviRpuOpaque *rpu = dovi_parse_unspec62_nalu(NULL, 0);
-    if (rpu) dovi_rpu_free(rpu);
+    // Parse and rewrite each UNSPEC62 RPU here when Profile 7 to 8.1 conversion
+    // is enabled. Until then the caller retains HDR10 base-layer fallback.
     return 0;
 }
 
