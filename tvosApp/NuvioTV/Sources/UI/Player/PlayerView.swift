@@ -78,7 +78,10 @@ struct RoutedPlayerView: View {
                     resumeFrom: resumeFrom,
                     onStageChange: { playbackStage = $0 },
                     onFailure: {
-                        playbackStage = "Native remux stalled. Falling back to MPVKit..."
+                        if playbackStage?.contains("failed") != true &&
+                            playbackStage?.contains("timed out") != true {
+                            playbackStage = "Native remux failed. Falling back to MPVKit..."
+                        }
                         shouldTryGMPlayer = false
                         activeEngine = .mpvKit
                     },
@@ -163,6 +166,7 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
         private var timeControlObservation: NSKeyValueObservation?
         private var endObserver: NSObjectProtocol?
         private var failureObserver: NSObjectProtocol?
+        private var preparationTimer: Timer?
         private var startupTimer: Timer?
         private var startupBaseline = 0.0
         private var startupDeadline: Date?
@@ -242,19 +246,27 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
                 }
             }
             model.open(remoteURL: url)
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
-                guard let self, !self.didResume else { return }
-                self.fail()
-            }
         }
         private func observe(item: AVPlayerItem, resumeFrom: Double?) {
+            preparationTimer?.invalidate()
+            let timer = Timer(timeInterval: 30, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self, !self.didResume else { return }
+                    self.onStageChange("Dolby Vision preparation timed out\nAVPlayer never became ready")
+                    self.fail()
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            preparationTimer = timer
+
             statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
                 guard let self else { return }
                 Task { @MainActor in
                     switch item.status {
                     case .readyToPlay:
                         guard !self.didResume else { return }
+                        self.preparationTimer?.invalidate()
+                        self.preparationTimer = nil
                         self.didResume = true
                         self.onStageChange("Waiting for first video frame...")
                         if let resumeFrom, resumeFrom > 0 {
@@ -292,6 +304,8 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
         private func fail() {
             guard !didFail else { return }
             didFail = true
+            preparationTimer?.invalidate()
+            preparationTimer = nil
             startupTimer?.invalidate()
             startupTimer = nil
             model.stop()
@@ -305,7 +319,7 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
             startupTimer?.invalidate()
             startupBaseline = model.player.currentTime().seconds.isFinite
                 ? model.player.currentTime().seconds : 0
-            startupDeadline = Date().addingTimeInterval(20)
+            startupDeadline = Date().addingTimeInterval(30)
             model.player.play()
 
             let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] timer in
@@ -321,6 +335,9 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
                         self.onStageChange(nil)
                     } else if let deadline = self.startupDeadline, Date() >= deadline {
                         timer.invalidate()
+                        let reason = self.model.player.reasonForWaitingToPlay
+                            .map(Self.waitingReason) ?? "no decoder progress"
+                        self.onStageChange("First video frame timed out\n\(reason)")
                         self.fail()
                     }
                 }
@@ -359,6 +376,8 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
             endObserver = nil
             if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
             failureObserver = nil
+            preparationTimer?.invalidate()
+            preparationTimer = nil
             startupTimer?.invalidate()
             startupTimer = nil
             cancellables.removeAll()
