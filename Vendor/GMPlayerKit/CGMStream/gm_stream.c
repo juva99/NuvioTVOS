@@ -747,6 +747,7 @@ int gm_stream_track_info(const gm_stream *s, int i, gm_track_info *out) {
     out->channels = (par->codec_type == AVMEDIA_TYPE_AUDIO) ? par->ch_layout.nb_channels : 0;
     out->width = (par->codec_type == AVMEDIA_TYPE_VIDEO) ? par->width : 0;
     out->height = (par->codec_type == AVMEDIA_TYPE_VIDEO) ? par->height : 0;
+    out->codec_level = (par->codec_type == AVMEDIA_TYPE_VIDEO && par->level > 0) ? par->level : 0;
     if (par->codec_type == AVMEDIA_TYPE_VIDEO) {
         AVRational fr = st->avg_frame_rate;
         if (fr.num <= 0 || fr.den <= 0) fr = st->r_frame_rate;

@@ -119,6 +119,7 @@ public final class GMStreamSession {
                 channels: Int(ti.channels),
                 width: Int(ti.width),
                 height: Int(ti.height),
+                codecLevel: Int(ti.codec_level),
                 fpsNum: Int(ti.fps_num),
                 fpsDen: Int(ti.fps_den),
                 isDefault: ti.is_default != 0,
@@ -213,7 +214,7 @@ public final class GMStreamSession {
     private var videoHLSCodec: String {
         guard let v = tracks.first(where: { $0.kind == .video }) else { return "hvc1" }
         switch v.codec {
-        case "hevc": return "hvc1"
+        case "hevc": return "hvc1.2.4.L\(v.codecLevel > 0 ? v.codecLevel : 150)"
         case "h264": return "avc1"
         default: return "hvc1"
         }

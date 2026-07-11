@@ -97,6 +97,7 @@ typedef struct {
     int  channels;       ///< audio only (0 otherwise)
     int  width;          ///< video only (0 otherwise)
     int  height;         ///< video only (0 otherwise)
+    int  codec_level;    ///< video codec level (HEVC general_level_idc), or 0
     int  fps_num;        ///< video only: frame-rate numerator (0 if unknown)
     int  fps_den;        ///< video only: frame-rate denominator (0 if unknown)
     int  is_default;     ///< 1 if the source marks this track DEFAULT

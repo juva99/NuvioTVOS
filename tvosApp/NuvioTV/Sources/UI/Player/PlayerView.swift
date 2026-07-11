@@ -203,13 +203,23 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
                     case .readyToPlay:
                         self.onStageChange("Preparing Dolby Vision playback...")
                     case .failed:
+                        let error = item.error as NSError?
+                        let detail = error.map {
+                            "AVPlayer error \($0.domain) \($0.code): \($0.localizedDescription)"
+                        } ?? "AVPlayer rejected the prepared stream"
+                        self.onStageChange("Dolby Vision preparation failed\n\(detail)")
                         self.fail()
                     }
                 }
             }.store(in: &cancellables)
             model.monitor.$snapshot.sink { [weak self] snapshot in
                 guard snapshot.status == "failed" || !snapshot.lastError.isEmpty else { return }
-                Task { @MainActor in self?.fail() }
+                Task { @MainActor in
+                    guard let self else { return }
+                    let detail = snapshot.lastError.isEmpty ? "AVPlayer rejected the stream" : snapshot.lastError
+                    self.onStageChange("Dolby Vision preparation failed\n\(detail)")
+                    self.fail()
+                }
             }.store(in: &cancellables)
 
             itemObservation = model.player.observe(\.currentItem, options: [.new]) { [weak self] player, _ in
@@ -289,7 +299,9 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
             startupTimer?.invalidate()
             startupTimer = nil
             model.stop()
-            onFailure()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 3) { [onFailure] in
+                onFailure()
+            }
         }
 
         private func startPlaybackWatchdog() {

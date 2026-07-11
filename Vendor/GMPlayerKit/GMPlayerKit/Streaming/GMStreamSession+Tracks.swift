@@ -80,6 +80,7 @@ public extension GMStreamSession {
         public var channels: Int
         public var width = 0
         public var height = 0
+        public var codecLevel = 0
         public var fpsNum = 0
         public var fpsDen = 0
         public var isDefault: Bool
