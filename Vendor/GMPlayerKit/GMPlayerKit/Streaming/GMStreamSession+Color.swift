@@ -25,10 +25,16 @@ extension GMStreamSession {
         resolvedLock.unlock()
 
         var resolved = color
+        // Dolby Vision already guarantees an HDR transfer. Probing a converted
+        // dvh1 fragment through a second AVAsset before playback can leave tvOS
+        // evaluating the same stream twice and delay startup indefinitely.
+        if resolved.dolbyVision && (resolved.transfer <= 0 || resolved.transfer == 2) {
+            resolved.transfer = 16
+        }
         // If the container left the transfer unspecified (matroska/HEVC), recover the
         // real one via AVFoundation parsing the muxed SPS. The format-metadata flags
         // (DoVi/HDR10/HDR10+) come from coded side data and are already populated.
-        if resolved.transfer <= 0 || resolved.transfer == 2 {
+        if !resolved.dolbyVision && (resolved.transfer <= 0 || resolved.transfer == 2) {
             if let t = try? probeTransferViaAVFoundation() { resolved.transfer = t }
         }
 

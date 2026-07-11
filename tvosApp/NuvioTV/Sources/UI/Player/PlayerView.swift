@@ -22,6 +22,7 @@ struct RoutedPlayerView: View {
 
     @State private var activeEngine: PlayerEngine
     @State private var shouldTryGMPlayer = false
+    @State private var playbackStage: String?
 
     init(
         preferredEngine: PlayerEngine,
@@ -52,6 +53,9 @@ struct RoutedPlayerView: View {
         self.onFinished = onFinished
         self.onBack = onBack
         _activeEngine = State(initialValue: preferredEngine)
+        _playbackStage = State(
+            initialValue: preferredEngine == .ksPlayer ? "Trying native playback..." : nil
+        )
     }
 
     var body: some View {
@@ -60,7 +64,11 @@ struct RoutedPlayerView: View {
                 KSNativePlayerView(
                     url: url,
                     resumeFrom: resumeFrom,
-                    onFailure: { shouldTryGMPlayer = true },
+                    onStarted: { playbackStage = nil },
+                    onFailure: {
+                        playbackStage = "Opening MKV remux engine..."
+                        shouldTryGMPlayer = true
+                    },
                     onFinished: onFinished ?? onBack
                 )
                 .onExitCommand(perform: onBack)
@@ -68,7 +76,9 @@ struct RoutedPlayerView: View {
                 GMNativePlayerView(
                     url: url,
                     resumeFrom: resumeFrom,
+                    onStageChange: { playbackStage = $0 },
                     onFailure: {
+                        playbackStage = "Native remux stalled. Falling back to MPVKit..."
                         shouldTryGMPlayer = false
                         activeEngine = .mpvKit
                     },
@@ -98,11 +108,12 @@ struct RoutedPlayerView: View {
 private struct GMNativePlayerView: UIViewControllerRepresentable {
     let url: URL
     let resumeFrom: Double?
+    let onStageChange: (String?) -> Void
     let onFailure: () -> Void
     let onFinished: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onFailure: onFailure, onFinished: onFinished)
+        Coordinator(onStageChange: onStageChange, onFailure: onFailure, onFinished: onFinished)
     }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
@@ -127,22 +138,53 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
         private var statusObservation: NSKeyValueObservation?
         private var endObserver: NSObjectProtocol?
         private var failureObserver: NSObjectProtocol?
+        private var startupTimer: Timer?
+        private var startupBaseline = 0.0
+        private var startupDeadline: Date?
         private var didResume = false
         private var didFail = false
+        private let onStageChange: (String?) -> Void
         private let onFailure: () -> Void
         private let onFinished: (() -> Void)?
 
-        init(onFailure: @escaping () -> Void, onFinished: (() -> Void)?) {
+        init(
+            onStageChange: @escaping (String?) -> Void,
+            onFailure: @escaping () -> Void,
+            onFinished: (() -> Void)?
+        ) {
+            self.onStageChange = onStageChange
             self.onFailure = onFailure
             self.onFinished = onFinished
         }
 
         func start(url: URL, controller: AVPlayerViewController, resumeFrom: Double?) {
             controller.player = model.player
+            onStageChange("Connecting to stream...")
             model.$state.sink { [weak self] state in
-                if case .failed = state {
-                    Task { @MainActor in self?.fail() }
+                Task { @MainActor in
+                    guard let self else { return }
+                    switch state {
+                    case .idle:
+                        break
+                    case .probing(let probe):
+                        switch probe.phase {
+                        case .connecting:
+                            self.onStageChange("Connecting to stream...")
+                        case .inspecting:
+                            self.onStageChange(Self.probeStage(probe))
+                        }
+                    case .remuxing(let progress):
+                        self.onStageChange("Remuxing MKV... \(Int(progress * 100))%")
+                    case .readyToPlay:
+                        self.onStageChange("Preparing Dolby Vision playback...")
+                    case .failed:
+                        self.fail()
+                    }
                 }
+            }.store(in: &cancellables)
+            model.monitor.$snapshot.sink { [weak self] snapshot in
+                guard snapshot.status == "failed" || !snapshot.lastError.isEmpty else { return }
+                Task { @MainActor in self?.fail() }
             }.store(in: &cancellables)
 
             itemObservation = model.player.observe(\.currentItem, options: [.new]) { [weak self] player, _ in
@@ -156,6 +198,30 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
                 self.fail()
             }
         }
+        .overlay {
+            if let playbackStage {
+                VStack(spacing: 20) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .scaleEffect(1.5)
+                    Text(playbackStage)
+                        .font(.headline)
+                        .foregroundStyle(.white)
+                        .multilineTextAlignment(.center)
+                }
+                .padding(.horizontal, 34)
+                .padding(.vertical, 26)
+                .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 24))
+                .allowsHitTesting(false)
+            }
+        }
+        .onChange(of: activeEngine) { engine in
+            if engine == .mpvKit {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+                    if activeEngine == .mpvKit { playbackStage = nil }
+                }
+            }
+        }
 
         private func observe(item: AVPlayerItem, resumeFrom: Double?) {
             statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
@@ -165,10 +231,16 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
                     case .readyToPlay:
                         guard !self.didResume else { return }
                         self.didResume = true
+                        self.onStageChange("Waiting for first video frame...")
                         if let resumeFrom, resumeFrom > 0 {
-                            self.model.player.seek(to: CMTime(seconds: resumeFrom, preferredTimescale: 600))
+                            self.model.player.seek(
+                                to: CMTime(seconds: resumeFrom, preferredTimescale: 600)
+                            ) { [weak self] _ in
+                                Task { @MainActor in self?.startPlaybackWatchdog() }
+                            }
+                        } else {
+                            self.startPlaybackWatchdog()
                         }
-                        self.model.player.play()
                     case .failed:
                         self.fail()
                     default:
@@ -195,7 +267,49 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
         private func fail() {
             guard !didFail else { return }
             didFail = true
+            startupTimer?.invalidate()
+            startupTimer = nil
+            model.stop()
             onFailure()
+        }
+
+        private func startPlaybackWatchdog() {
+            guard !didFail else { return }
+            startupTimer?.invalidate()
+            startupBaseline = model.player.currentTime().seconds.isFinite
+                ? model.player.currentTime().seconds : 0
+            startupDeadline = Date().addingTimeInterval(20)
+            model.player.play()
+
+            let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] timer in
+                Task { @MainActor in
+                    guard let self, !self.didFail else {
+                        timer.invalidate()
+                        return
+                    }
+                    let current = self.model.player.currentTime().seconds
+                    if current.isFinite, current >= self.startupBaseline + 0.5 {
+                        timer.invalidate()
+                        self.startupTimer = nil
+                        self.onStageChange(nil)
+                    } else if let deadline = self.startupDeadline, Date() >= deadline {
+                        timer.invalidate()
+                        self.fail()
+                    }
+                }
+            }
+            RunLoop.main.add(timer, forMode: .common)
+            startupTimer = timer
+        }
+
+        private static func probeStage(_ probe: GMPlayerModel.ProbeStatus) -> String {
+            let bytes = ByteCountFormatter.string(fromByteCount: probe.bytesRead, countStyle: .file)
+            guard probe.bytesPerSec > 0 else { return "Inspecting MKV... \(bytes)" }
+            let rate = ByteCountFormatter.string(
+                fromByteCount: Int64(probe.bytesPerSec),
+                countStyle: .file
+            )
+            return "Inspecting MKV... \(bytes) at \(rate)/s"
         }
 
         func shutdown() {
@@ -207,6 +321,8 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
             endObserver = nil
             if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
             failureObserver = nil
+            startupTimer?.invalidate()
+            startupTimer = nil
             cancellables.removeAll()
             model.stop()
         }
@@ -216,11 +332,12 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
 private struct KSNativePlayerView: UIViewControllerRepresentable {
     let url: URL
     let resumeFrom: Double?
+    let onStarted: () -> Void
     let onFailure: () -> Void
     let onFinished: (() -> Void)?
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(onFailure: onFailure, onFinished: onFinished)
+        Coordinator(onStarted: onStarted, onFailure: onFailure, onFinished: onFinished)
     }
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {
@@ -249,10 +366,16 @@ private struct KSNativePlayerView: UIViewControllerRepresentable {
         private var failureObserver: NSObjectProtocol?
         private var didStart = false
         private var didFail = false
+        private let onStarted: () -> Void
         private let onFailure: () -> Void
         private let onFinished: (() -> Void)?
 
-        init(onFailure: @escaping () -> Void, onFinished: (() -> Void)?) {
+        init(
+            onStarted: @escaping () -> Void,
+            onFailure: @escaping () -> Void,
+            onFinished: (() -> Void)?
+        ) {
+            self.onStarted = onStarted
             self.onFailure = onFailure
             self.onFinished = onFinished
         }
@@ -273,6 +396,7 @@ private struct KSNativePlayerView: UIViewControllerRepresentable {
                         return
                     }
                     self.didStart = true
+                    self.onStarted()
                     if let resumeFrom, resumeFrom > 0 {
                         player.currentPlaybackTime = resumeFrom
                     }
