@@ -208,7 +208,13 @@ static int add_out_stream(gm_stream *s, AVFormatContext *oc, int src_idx, int *v
     if (title) av_dict_set(&ost->metadata, "title", title->value, 0);
     ost->disposition = ist->disposition;
     if (ist->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-        if (ist->codecpar->codec_id == AV_CODEC_ID_HEVC) ost->codecpar->codec_tag = MKTAG('h','v','c','1');
+        GMDoviConverter *dovi = gm_dovi_converter_create(ist->codecpar);
+        int source_dovi_profile = gm_dovi_converter_profile(dovi);
+        int dovi_ret = gm_dovi_converter_configure_output(dovi, ost->codecpar);
+        gm_dovi_converter_free(&dovi);
+        if (dovi_ret < 0) return dovi_ret;
+        if (ist->codecpar->codec_id == AV_CODEC_ID_HEVC && source_dovi_profile != 7)
+            ost->codecpar->codec_tag = MKTAG('h','v','c','1');
         else if (ist->codecpar->codec_id == AV_CODEC_ID_H264) ost->codecpar->codec_tag = MKTAG('a','v','c','1');
         if (vout) *vout = ost->index;
     } else if (aout && *aout < 0) {
@@ -274,6 +280,7 @@ static int open_output(gm_stream *s, gm_buf *buf, double ts_offset_sec, gm_sel s
     if (!avio) { av_free(iob); free(octx); avformat_free_context(oc); set_err(err, errlen, "alloc out avio", 0); return -1; }
     oc->pb = avio;
     oc->flags |= AVFMT_FLAG_BITEXACT;  // deterministic moov across segments
+    oc->strict_std_compliance = FF_COMPLIANCE_UNOFFICIAL;
     // Each segment is produced by a fresh muxer but must keep ABSOLUTE timestamps
     // so its tfdt (baseMediaDecodeTime) places it on the global HLS timeline. Keep
     // negative ts (don't let the muxer shift toward zero) and add the segment's
@@ -654,7 +661,7 @@ int gm_stream_segment_count(const gm_stream *s) { return s ? s->n_seg : 0; }
 int gm_stream_color_info(const gm_stream *s, gm_color_info *out) {
     if (!out) return -1;
     out->transfer = -1; out->primaries = -1; out->matrix = -1; out->range = -1;
-    out->dolby_vision = 0; out->dovi_profile = 0;
+    out->dolby_vision = 0; out->dovi_profile = 0; out->dovi_level = 0;
     out->has_mastering = 0; out->has_hdr10plus = 0;
     if (!s || s->video_in < 0 || !s->in) return -1;
     AVStream *st = s->in->streams[s->video_in];
@@ -669,9 +676,12 @@ int gm_stream_color_info(const gm_stream *s, gm_color_info *out) {
     // them is ALWAYS false and silently compiles the checks out. Reference them directly.
     for (int i = 0; i < par->nb_coded_side_data; i++) {
         const AVPacketSideData *sd = &par->coded_side_data[i];
-        if (sd->type == AV_PKT_DATA_DOVI_CONF && sd->data && sd->size >= 3) {
+        if (sd->type == AV_PKT_DATA_DOVI_CONF && sd->data && sd->size >= 9) {
+            const AVDOVIDecoderConfigurationRecord *dovi =
+                (const AVDOVIDecoderConfigurationRecord *)sd->data;
             out->dolby_vision = 1;
-            out->dovi_profile = sd->data[2]; // dv_profile is the 3rd byte of the DOVI record
+            out->dovi_profile = dovi->dv_profile;
+            out->dovi_level = dovi->dv_level;
         } else if (sd->type == AV_PKT_DATA_MASTERING_DISPLAY_METADATA) {
             out->has_mastering = 1;
         } else if (sd->type == AV_PKT_DATA_DYNAMIC_HDR10_PLUS) {

@@ -59,10 +59,15 @@ int gm_remux_to_fmp4(const char *input_url,
         ret = avcodec_parameters_copy(ost->codecpar, ist->codecpar);
         if (ret < 0) { gm_set_err(errbuf, errbuf_len, "copy codecpar failed", ret); goto done; }
         ost->codecpar->codec_tag = 0;
+        if ((int)i == video_stream) {
+            ret = gm_dovi_converter_configure_output(dovi, ost->codecpar);
+            if (ret < 0) { gm_set_err(errbuf, errbuf_len, "configure Dolby Vision output failed", ret); goto done; }
+        }
 
         // Force the fourcc AVFoundation expects.
         if (ist->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            if (ist->codecpar->codec_id == AV_CODEC_ID_HEVC)
+            if (ist->codecpar->codec_id == AV_CODEC_ID_HEVC &&
+                gm_dovi_converter_profile(dovi) != 7)
                 ost->codecpar->codec_tag = MKTAG('h', 'v', 'c', '1');
             else if (ist->codecpar->codec_id == AV_CODEC_ID_H264)
                 ost->codecpar->codec_tag = MKTAG('a', 'v', 'c', '1');
@@ -86,6 +91,7 @@ int gm_remux_to_fmp4(const char *input_url,
     // 4K fragments.)
     AVDictionary *mux_opts = NULL;
     av_dict_set(&mux_opts, "movflags", "faststart", 0);
+    out->strict_std_compliance = FF_COMPLIANCE_UNOFFICIAL;
     ret = avformat_write_header(out, &mux_opts);
     av_dict_free(&mux_opts);
     if (ret < 0) { gm_set_err(errbuf, errbuf_len, "write_header failed", ret); goto done; }

@@ -139,6 +139,7 @@ public final class GMStreamSession {
             range: Int(ci.range),
             dolbyVision: ci.dolby_vision != 0,
             doviProfile: Int(ci.dovi_profile),
+            doviLevel: Int(ci.dovi_level),
             hasMastering: ci.has_mastering != 0,
             hasHDR10Plus: ci.has_hdr10plus != 0
         )
@@ -212,7 +213,9 @@ public final class GMStreamSession {
     private var videoHLSCodec: String {
         guard let v = tracks.first(where: { $0.kind == .video }) else { return "hvc1" }
         switch v.codec {
-        case "hevc": return "hvc1"
+        case "hevc": return color.doviProfile == 7
+            ? String(format: "dvh1.08.%02d", color.doviLevel)
+            : "hvc1"
         case "h264": return "avc1"
         default: return "hvc1"
         }

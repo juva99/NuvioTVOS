@@ -8,6 +8,7 @@ typedef struct GMDoviConverter GMDoviConverter;
 
 GMDoviConverter *gm_dovi_converter_create(const AVCodecParameters *codecpar);
 int gm_dovi_converter_profile(const GMDoviConverter *converter);
+int gm_dovi_converter_configure_output(const GMDoviConverter *converter, AVCodecParameters *codecpar);
 int gm_dovi_converter_transform_packet(GMDoviConverter *converter, AVPacket *packet);
 void gm_dovi_converter_free(GMDoviConverter **converter);
 

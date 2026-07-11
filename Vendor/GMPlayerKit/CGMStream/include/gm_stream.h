@@ -64,6 +64,7 @@ typedef struct {
     int range;        ///< AVColorRange (1=MPEG/limited, 2=JPEG/full)
     int dolby_vision; ///< 1 if a Dolby Vision configuration record is present, else 0
     int dovi_profile; ///< Dolby Vision profile (5/7/8/...), or 0
+    int dovi_level;   ///< Dolby Vision level, or 0
     int has_mastering;///< 1 if static mastering-display metadata (HDR10) is present
     int has_hdr10plus;///< 1 if dynamic HDR10+ (ST 2094-40) metadata was seen, else 0
 } gm_color_info;

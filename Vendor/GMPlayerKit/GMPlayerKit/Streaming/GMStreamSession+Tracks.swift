@@ -20,6 +20,7 @@ public extension GMStreamSession {
         public var range: Int // AVColorRange (1=limited, 2=full)
         public var dolbyVision = false // a Dolby Vision configuration record is present
         public var doviProfile = 0 // 5 / 7 / 8 / ...
+        public var doviLevel = 0
         public var hasMastering = false // static mastering-display metadata (HDR10)
         public var hasHDR10Plus = false // dynamic ST 2094-40 metadata (HDR10+)
 

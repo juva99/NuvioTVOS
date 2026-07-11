@@ -29,9 +29,9 @@ static void fill_dovi(AVStream *st, GMStreamDesc *d) {
     // dv_profile is the 3rd byte of the DOVI configuration record (a plain uint8_t).
     for (int i = 0; i < st->codecpar->nb_coded_side_data; i++) {
         const AVPacketSideData *sd = &st->codecpar->coded_side_data[i];
-        if (sd->type == AV_PKT_DATA_DOVI_CONF && sd->data && sd->size >= 3) {
+        if (sd->type == AV_PKT_DATA_DOVI_CONF && sd->data && sd->size >= 9) {
             d->is_dolby_vision = true;
-            d->dovi_profile = sd->data[2];
+            d->dovi_profile = ((const AVDOVIDecoderConfigurationRecord *)sd->data)->dv_profile;
             return;
         }
     }
