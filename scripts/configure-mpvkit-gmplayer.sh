@@ -46,6 +46,7 @@ targets = '''
             path: "Sources/GMPlayerFork/CFFmpeg",
             sources: ["compat.c", "dovi.c", "probe.c", "remux.c"],
             publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(["-fno-modules"])],
             linkerSettings: [
                 .linkedLibrary("z"), .linkedLibrary("bz2"), .linkedLibrary("iconv"),
                 .linkedFramework("CoreFoundation"), .linkedFramework("CoreMedia"),
@@ -57,7 +58,8 @@ targets = '''
             name: "CGMStream",
             dependencies: ["Libavcodec", "Libavformat", "Libavutil", "Libdovi", "CGMTimestamp", "CFFmpeg"],
             path: "Sources/GMPlayerFork/CGMStream",
-            publicHeadersPath: "include"
+            publicHeadersPath: "include",
+            cSettings: [.unsafeFlags(["-fno-modules"])]
         ),
         .target(
             name: "GMPlayerKit",
