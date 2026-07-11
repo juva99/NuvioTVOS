@@ -15,8 +15,10 @@ import sys
 
 path = Path(sys.argv[1])
 text = path.read_text()
+text = text.replace('.tvOS(.v14)', '.tvOS(.v15)', 1)
 
 if 'name: "GMPlayerKit"' in text:
+    path.write_text(text)
     raise SystemExit(0)
 
 product_anchor = '''        .library(
