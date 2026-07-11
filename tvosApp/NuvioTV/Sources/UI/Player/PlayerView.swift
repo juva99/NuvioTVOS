@@ -203,11 +203,7 @@ private struct GMNativePlayerView: UIViewControllerRepresentable {
                     case .readyToPlay:
                         self.onStageChange("Preparing Dolby Vision playback...")
                     case .failed:
-                        let error = item.error as NSError?
-                        let detail = error.map {
-                            "AVPlayer error \($0.domain) \($0.code): \($0.localizedDescription)"
-                        } ?? "AVPlayer rejected the prepared stream"
-                        self.onStageChange("Dolby Vision preparation failed\n\(detail)")
+                        self.onStageChange("Dolby Vision preparation failed\nRemux engine could not prepare the stream")
                         self.fail()
                     }
                 }
