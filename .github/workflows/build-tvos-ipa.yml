@@ -6,10 +6,14 @@ on:
     branches: [main]
     paths:
       - "tvosApp/**"
+      - "Vendor/GMPlayerKit/**"
+      - "scripts/configure-mpvkit-gmplayer.sh"
       - ".github/workflows/build-tvos-ipa.yml"
   pull_request:
     paths:
       - "tvosApp/**"
+      - "Vendor/GMPlayerKit/**"
+      - "scripts/configure-mpvkit-gmplayer.sh"
       - ".github/workflows/build-tvos-ipa.yml"
 
 permissions:
@@ -43,6 +47,7 @@ jobs:
           curl --fail --location --retry 3 \
             --output MPVKit/Package.swift \
             https://raw.githubusercontent.com/mpvkit/MPVKit/0.41.0/Package.swift
+          bash ./scripts/configure-mpvkit-gmplayer.sh
           rm -rf "$HOME/Library/Caches/org.swift.swiftpm/artifacts"
 
       - name: Build tvOS app

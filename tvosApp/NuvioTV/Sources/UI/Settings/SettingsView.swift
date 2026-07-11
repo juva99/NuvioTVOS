@@ -1517,7 +1517,7 @@ private struct PlaybackSettingsView: View {
             SettingsGroup(title: "Player", subtitle: "Playback engine and episode flow") {
                 SettingsOptionRow(
                     title: "Player Engine",
-                    subtitle: "Auto uses native playback for regular titles and MPVKit for anime or incompatible streams",
+                    subtitle: "Auto uses native playback, remuxes incompatible MKV files, and keeps MPVKit for anime or fallback",
                     selection: $playerEngine,
                     options: engines,
                     accentColor: accentColor

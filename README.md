@@ -186,6 +186,9 @@ Some older verification scripts in `tvosApp/` still carry inherited iOS wording.
 - `tvosApp/NuvioTV/Sources/Data/Repository/` contains catalog, metadata, stream, and subtitle fetching.
 - `tvosApp/NuvioTV/Sources/Core/Auth/` contains Supabase email and TV QR-login support.
 - `MPVKit/` is the local Swift Package used for playback.
+- `Vendor/GMPlayerKit/` is the native MKV remux engine compiled against
+  MPVKit's shared FFmpeg libraries; run `bash scripts/configure-mpvkit-gmplayer.sh`
+  after initializing or replacing the MPVKit submodule manifest.
 - `composeApp/` and `iosApp/` are inherited from the mobile fork and remain useful references while tvOS functionality is ported.
 
 ## Built With

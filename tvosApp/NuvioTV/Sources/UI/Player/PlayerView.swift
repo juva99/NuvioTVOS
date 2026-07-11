@@ -1,6 +1,8 @@
 import SwiftUI
 import UIKit
 import AVKit
+import Combine
+import GMPlayerKit
 import KSPlayer
 
 struct RoutedPlayerView: View {
@@ -19,6 +21,7 @@ struct RoutedPlayerView: View {
     var onBack: () -> Void
 
     @State private var activeEngine: PlayerEngine
+    @State private var shouldTryGMPlayer = false
 
     init(
         preferredEngine: PlayerEngine,
@@ -53,11 +56,22 @@ struct RoutedPlayerView: View {
 
     var body: some View {
         Group {
-            if activeEngine == .ksPlayer {
+            if activeEngine == .ksPlayer && !shouldTryGMPlayer {
                 KSNativePlayerView(
                     url: url,
                     resumeFrom: resumeFrom,
-                    onFailure: { activeEngine = .mpvKit },
+                    onFailure: { shouldTryGMPlayer = true },
+                    onFinished: onFinished ?? onBack
+                )
+                .onExitCommand(perform: onBack)
+            } else if activeEngine == .ksPlayer && shouldTryGMPlayer {
+                GMNativePlayerView(
+                    url: url,
+                    resumeFrom: resumeFrom,
+                    onFailure: {
+                        shouldTryGMPlayer = false
+                        activeEngine = .mpvKit
+                    },
                     onFinished: onFinished ?? onBack
                 )
                 .onExitCommand(perform: onBack)
@@ -77,6 +91,124 @@ struct RoutedPlayerView: View {
                     onBack: onBack
                 )
             }
+        }
+    }
+}
+
+private struct GMNativePlayerView: UIViewControllerRepresentable {
+    let url: URL
+    let resumeFrom: Double?
+    let onFailure: () -> Void
+    let onFinished: (() -> Void)?
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onFailure: onFailure, onFinished: onFinished)
+    }
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.showsPlaybackControls = true
+        context.coordinator.start(url: url, controller: controller, resumeFrom: resumeFrom)
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {}
+
+    static func dismantleUIViewController(_ controller: AVPlayerViewController, coordinator: Coordinator) {
+        coordinator.shutdown()
+        controller.player = nil
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        private let model = GMPlayerModel()
+        private var cancellables: Set<AnyCancellable> = []
+        private var itemObservation: NSKeyValueObservation?
+        private var statusObservation: NSKeyValueObservation?
+        private var endObserver: NSObjectProtocol?
+        private var failureObserver: NSObjectProtocol?
+        private var didResume = false
+        private var didFail = false
+        private let onFailure: () -> Void
+        private let onFinished: (() -> Void)?
+
+        init(onFailure: @escaping () -> Void, onFinished: (() -> Void)?) {
+            self.onFailure = onFailure
+            self.onFinished = onFinished
+        }
+
+        func start(url: URL, controller: AVPlayerViewController, resumeFrom: Double?) {
+            controller.player = model.player
+            model.$state.sink { [weak self] state in
+                if case .failed = state {
+                    Task { @MainActor in self?.fail() }
+                }
+            }.store(in: &cancellables)
+
+            itemObservation = model.player.observe(\.currentItem, options: [.new]) { [weak self] player, _ in
+                guard let self, let item = player.currentItem else { return }
+                Task { @MainActor in self.observe(item: item, resumeFrom: resumeFrom) }
+            }
+            model.open(remoteURL: url)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 15) { [weak self] in
+                guard let self, !self.didResume else { return }
+                self.fail()
+            }
+        }
+
+        private func observe(item: AVPlayerItem, resumeFrom: Double?) {
+            statusObservation = item.observe(\.status, options: [.initial, .new]) { [weak self] item, _ in
+                guard let self else { return }
+                Task { @MainActor in
+                    switch item.status {
+                    case .readyToPlay:
+                        guard !self.didResume else { return }
+                        self.didResume = true
+                        if let resumeFrom, resumeFrom > 0 {
+                            self.model.player.seek(to: CMTime(seconds: resumeFrom, preferredTimescale: 600))
+                        }
+                        self.model.player.play()
+                    case .failed:
+                        self.fail()
+                    default:
+                        break
+                    }
+                }
+            }
+            endObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemDidPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.onFinished?() }
+            }
+            failureObserver = NotificationCenter.default.addObserver(
+                forName: .AVPlayerItemFailedToPlayToEndTime,
+                object: item,
+                queue: .main
+            ) { [weak self] _ in
+                Task { @MainActor in self?.fail() }
+            }
+        }
+
+        private func fail() {
+            guard !didFail else { return }
+            didFail = true
+            onFailure()
+        }
+
+        func shutdown() {
+            itemObservation?.invalidate()
+            itemObservation = nil
+            statusObservation?.invalidate()
+            statusObservation = nil
+            if let endObserver { NotificationCenter.default.removeObserver(endObserver) }
+            endObserver = nil
+            if let failureObserver { NotificationCenter.default.removeObserver(failureObserver) }
+            failureObserver = nil
+            cancellables.removeAll()
+            model.stop()
         }
     }
 }
@@ -161,12 +293,16 @@ private struct KSNativePlayerView: UIViewControllerRepresentable {
                 forName: .AVPlayerItemDidPlayToEndTime,
                 object: item,
                 queue: .main
-            ) { [weak self] _ in self?.onFinished?() }
+            ) { [weak self] _ in
+                Task { @MainActor in self?.onFinished?() }
+            }
             failureObserver = NotificationCenter.default.addObserver(
                 forName: .AVPlayerItemFailedToPlayToEndTime,
                 object: item,
                 queue: .main
-            ) { [weak self] _ in self?.fail() }
+            ) { [weak self] _ in
+                Task { @MainActor in self?.fail() }
+            }
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 12) { [weak self, weak player] in
                 guard let self, let player, !self.didStart,
